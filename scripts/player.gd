@@ -1,0 +1,101 @@
+extends CharacterBody3D
+## M2 player: third-person over-the-shoulder camera, mouse + stick look, ADS zoom,
+## camera-relative movement. One InputCommand per fixed tick; look + ADS travel in
+## the command (netcode/replay-friendly). Motion stays in the pure PlayerMotion
+## model; the camera orbit + look math are pure static helpers (unit-tested).
+
+const InputCommand = preload("res://input/input_command.gd")
+const PlayerMotion = preload("res://sim/player_motion.gd")
+const LocalInputProvider = preload("res://input/local_input_provider.gd")
+
+const FIXED_DT := 1.0 / 60.0
+const STAND_HEIGHT := 1.8
+const CROUCH_HEIGHT := 1.2
+const PITCH_LIMIT := 1.3962634  # deg_to_rad(80)
+
+# Camera rig (hip / ADS) — chosen with the user.
+const HIP_DIST := 3.0
+const HIP_HEIGHT := 1.6
+const HIP_SHOULDER := 0.5
+const HIP_FOV := 75.0
+const ADS_DIST := 1.5
+const ADS_HEIGHT := 1.6
+const ADS_SHOULDER := 0.35
+const ADS_FOV := 55.0
+const ADS_BLEND_SPEED := 8.0    # 1/sec; ~0.125s hip <-> ADS transition
+
+var _motion = PlayerMotion.new()
+var _provider = LocalInputProvider.new()
+var _tick := 0
+var _yaw := 0.0
+var _pitch := 0.0
+var _ads_blend := 0.0
+
+@onready var _col: CollisionShape3D = $Collision
+@onready var _mesh: MeshInstance3D = $Mesh
+@onready var _camera: Camera3D = $Camera3D
+
+func _ready() -> void:
+	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	print("[Player] spawned at %v, active camera: %s" % [global_position, _camera.name])
+	_update_camera(false, 0.0)
+
+func _input(event: InputEvent) -> void:
+	if event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
+		_provider.add_mouse_motion((event as InputEventMouseMotion).relative)
+	elif event.is_action_pressed("ui_cancel"):
+		# Free / recapture the mouse for testing.
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED else Input.MOUSE_MODE_CAPTURED
+
+func _physics_process(_delta: float) -> void:
+	var cmd = _provider.poll(_tick)
+
+	# Look (radians this tick) -> yaw/pitch. Body faces yaw (strafe-style).
+	_yaw = wrapf(_yaw + cmd.look.x, -PI, PI)
+	_pitch = clampf(_pitch + cmd.look.y, -PITCH_LIMIT, PITCH_LIMIT)
+	rotation.y = _yaw
+
+	_motion.tick(cmd, FIXED_DT, is_on_floor(), _yaw)
+	velocity = _motion.velocity
+	move_and_slide()
+	_apply_crouch(_motion.crouching)
+
+	var ads: bool = (cmd.buttons & InputCommand.BTN_ADS) != 0
+	_update_camera(ads, FIXED_DT)
+	_tick += 1
+
+func _apply_crouch(crouched: bool) -> void:
+	var h := CROUCH_HEIGHT if crouched else STAND_HEIGHT
+	var shape := _col.shape as CapsuleShape3D
+	if shape and not is_equal_approx(shape.height, h):
+		shape.height = h
+		_col.position.y = h * 0.5
+		var m := _mesh.mesh as CapsuleMesh
+		if m:
+			m.height = h
+		_mesh.position.y = h * 0.5
+
+func _update_camera(ads: bool, dt: float) -> void:
+	_ads_blend = move_toward(_ads_blend, 1.0 if ads else 0.0, ADS_BLEND_SPEED * dt)
+	var dist := lerpf(HIP_DIST, ADS_DIST, _ads_blend)
+	var height := lerpf(HIP_HEIGHT, ADS_HEIGHT, _ads_blend)
+	var shoulder := lerpf(HIP_SHOULDER, ADS_SHOULDER, _ads_blend)
+	_camera.fov = lerpf(HIP_FOV, ADS_FOV, _ads_blend)
+	var cam_pos := camera_position(global_position, _yaw, _pitch, dist, height, shoulder)
+	_camera.global_position = cam_pos
+	_camera.look_at(cam_pos + look_forward(_yaw, _pitch), Vector3.UP)
+
+# --- pure helpers (deterministic; unit-tested) ---
+
+static func look_forward(yaw: float, pitch: float) -> Vector3:
+	return Vector3(-sin(yaw) * cos(pitch), sin(pitch), -cos(yaw) * cos(pitch))
+
+static func look_right(yaw: float) -> Vector3:
+	return Vector3(cos(yaw), 0.0, -sin(yaw))
+
+static func camera_position(origin: Vector3, yaw: float, pitch: float, dist: float, height: float, shoulder: float) -> Vector3:
+	var pivot := origin + Vector3(0.0, height, 0.0) + look_right(yaw) * shoulder
+	return pivot - look_forward(yaw, pitch) * dist
+
+static func clamp_pitch(p: float) -> float:
+	return clampf(p, -PITCH_LIMIT, PITCH_LIMIT)

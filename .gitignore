@@ -1,0 +1,13 @@
+# Godot 4 editor import cache & generated data
+.godot/
+
+# Exported builds / artifacts
+/build/
+/export/
+*.exe
+*.pck
+*.zip
+
+# OS / editor cruft
+.DS_Store
+Thumbs.db
