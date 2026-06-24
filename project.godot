@@ -18,3 +18,8 @@ run/max_fps=60
 [autoload]
 
 Rng="*res://services/rng.gd"
+
+[editor]
+
+version_control/plugin_name="GitPlugin"
+version_control/autoload_on_startup=true
