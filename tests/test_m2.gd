@@ -67,3 +67,30 @@ func _run_suite() -> void:
 	var a := _forward_dir(PI / 3.0)
 	var b := _forward_dir(PI / 3.0)
 	_check("determinism", ("%v" % a) == ("%v" % b), "(a=%v b=%v)" % [a, b])
+
+	# --- ADS camera behavior (Fortnite-style right shift + slider-safe zoom) ---
+	var hip := PlayerScript.rig_params(0.0)
+	var adsp := PlayerScript.rig_params(1.0)
+	var hip_cam := PlayerScript.camera_position(Vector3.ZERO, 0.0, 0.0, hip["dist"], hip["height"], hip["shoulder"])
+	var ads_cam := PlayerScript.camera_position(Vector3.ZERO, 0.0, 0.0, adsp["dist"], adsp["height"], adsp["shoulder"])
+	# ADS shifts the camera to the right (yaw 0 -> +X).
+	_check("ads_shifts_camera_right", ads_cam.x > hip_cam.x + 0.2, "(hip_x=%.3f ads_x=%.3f)" % [hip_cam.x, ads_cam.x])
+	# Shift is purely lateral: no pull-in (z) and no vertical change (y) -> crosshair stays centered.
+	_check("ads_lateral_only", absf(ads_cam.y - hip_cam.y) < 1e-5 and absf(ads_cam.z - hip_cam.z) < 1e-5, "(dy=%.4f dz=%.4f)" % [ads_cam.y - hip_cam.y, ads_cam.z - hip_cam.z])
+
+	# Returning to hip: blend 0 geometry == hip, and FOV at blend 0 == base FOV.
+	var fov0 := lerpf(75.0, PlayerScript.ads_fov_for(75.0, PlayerScript.ADS_ZOOM), 0.0)
+	var hip_ok: bool = absf(hip["dist"] - PlayerScript.HIP_DIST) < 1e-6 and absf(hip["shoulder"] - PlayerScript.HIP_SHOULDER) < 1e-6
+	_check("ads_returns_to_hip", hip_ok and absf(fov0 - 75.0) < 1e-6, "(dist=%.3f shoulder=%.3f fov0=%.3f)" % [hip["dist"], hip["shoulder"], fov0])
+
+	# ADS FOV value at base 75 (~46.2 deg for 1.8x).
+	var adsfov75 := PlayerScript.ads_fov_for(75.0, 1.8)
+	_check("ads_fov_value", absf(adsfov75 - 46.19) < 0.3, "(ads_fov=%.2f)" % adsfov75)
+
+	# Magnification == zoom factor for ANY base FOV (proves FOV-slider compatibility).
+	var mag75 := _magnification(75.0, PlayerScript.ads_fov_for(75.0, 1.8))
+	var mag100 := _magnification(100.0, PlayerScript.ads_fov_for(100.0, 1.8))
+	_check("ads_zoom_slider_safe", absf(mag75 - 1.8) < 1e-3 and absf(mag100 - 1.8) < 1e-3, "(mag75=%.4f mag100=%.4f)" % [mag75, mag100])
+
+func _magnification(base_fov: float, ads_fov: float) -> float:
+	return tan(deg_to_rad(base_fov) * 0.5) / tan(deg_to_rad(ads_fov) * 0.5)
