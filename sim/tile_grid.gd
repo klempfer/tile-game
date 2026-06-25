@@ -48,3 +48,22 @@ func owners_hash() -> int:
 	for coord in topology.all_tiles():
 		s += "%d,%d:%d|" % [coord.x, coord.y, _owner[coord]]
 	return hash(s)
+
+## Frontier outline category for a tile: 0 neutral, 1 team1, 2 team2, 3 blend.
+## A team "touches" a tile if it owns it OR owns an edge-neighbor; both -> blend.
+func outline_category(coord: Vector2i) -> int:
+	var t1 := get_owner(coord) == TEAM1
+	var t2 := get_owner(coord) == TEAM2
+	for n in topology.edge_neighbors(coord):
+		var no := get_owner(n)
+		if no == TEAM1:
+			t1 = true
+		elif no == TEAM2:
+			t2 = true
+	if t1 and t2:
+		return 3
+	if t1:
+		return 1
+	if t2:
+		return 2
+	return 0

@@ -1,37 +1,48 @@
 extends Node3D
-## M3 tile grid visualization: per-tile tinted fill + outline border built FROM the
-## topology's cell polygons (so a hex topology would render correctly too), colored
-## by ownership state. Spawn tiles get a distinct marker. F1 toggles (col,row)
-## debug labels (off by default).
+## M4 tile world: renders the grid and drives the capture sim each fixed tick from
+## the player's tile presence. Fill = owner color (blended toward the capturing
+## team's color by progress); outline = frontier category (neutral / team1 / team2
+## / blend) via TileGrid.outline_category. All colors come from TeamColors so they
+## stay customizable. F1 toggles (col,row) debug labels (off by default).
 
 const TileGrid = preload("res://sim/tile_grid.gd")
 const SquareTopology = preload("res://sim/square_topology.gd")
+const Capture = preload("res://sim/capture.gd")
+const TeamColors = preload("res://sim/team_colors.gd")
 const DefaultBinds = preload("res://input/default_binds.gd")
 
-const OUTLINE_W := 0.1     # world-space border width
+const OUTLINE_W := 0.1
 const Y_OUTLINE := 0.01
 const Y_FILL := 0.02
 const Y_MARKER := 0.03
 const Y_LABEL := 0.15
+const FIXED_DT := 1.0 / 60.0
 
-# Neutral grey / Team1 blue / Team2 red — subtle fill tint + brighter outline.
-const FILL := [Color(0.5, 0.52, 0.55), Color(0.24, 0.34, 0.62), Color(0.6, 0.3, 0.27)]
-const OUTLINE := [Color(0.72, 0.74, 0.77), Color(0.3, 0.55, 1.0), Color(0.96, 0.33, 0.28)]
+@export var player_path: NodePath
+@export var debug_enemy_patch := false
 
 var grid
+var capture
+var _player: Node3D
 var _fill_mi: Dictionary = {}     # coord -> MeshInstance3D
+var _fill_mat: Dictionary = {}    # coord -> StandardMaterial3D (own, for progress blend)
 var _outline_mi: Dictionary = {}  # coord -> MeshInstance3D
-var _mats: Array = []             # [fill0,fill1,fill2, out0,out1,out2]
+var _outline_mats: Array = []     # 4 shared materials indexed by category
 var _labels_root: Node3D
+var _prev_active: Dictionary = {}
 
 func _ready() -> void:
 	DefaultBinds.ensure_default_actions()
 	grid = TileGrid.new(SquareTopology.new(9, 20, 5.0))
-	for c in FILL:
-		_mats.append(_mat(c))
-	for c in OUTLINE:
-		_mats.append(_mat(c))
+	capture = Capture.new(grid)
+	_player = get_node_or_null(player_path) as Node3D
 	_build()
+	if debug_enemy_patch:
+		# Team-2 tiles near the player so neutralizing is testable before the real
+		# enemy actor (M6).
+		for c in [Vector2i(4, 4), Vector2i(5, 4), Vector2i(6, 4)]:
+			grid.set_owner(c, TileGrid.TEAM2)
+	_refresh_all()
 
 func _mat(c: Color) -> StandardMaterial3D:
 	var m := StandardMaterial3D.new()
@@ -39,33 +50,36 @@ func _mat(c: Color) -> StandardMaterial3D:
 	return m
 
 func _build() -> void:
+	for i in 4:
+		_outline_mats.append(_mat(TeamColors.outline_color(i)))
 	var topo = grid.topology
 	var s: float = topo.size
-	var fill_size := s - 2.0 * OUTLINE_W
-
+	var fs := s - 2.0 * OUTLINE_W
 	_labels_root = Node3D.new()
 	_labels_root.name = "Labels"
 	_labels_root.visible = false
 	add_child(_labels_root)
-
 	for coord in topo.all_tiles():
 		var ctr: Vector3 = topo.tile_to_world_center(coord)
 
 		var outline := MeshInstance3D.new()
-		var omesh := PlaneMesh.new()
-		omesh.size = Vector2(s, s)
-		outline.mesh = omesh
+		var om := PlaneMesh.new()
+		om.size = Vector2(s, s)
+		outline.mesh = om
 		outline.position = ctr + Vector3(0.0, Y_OUTLINE, 0.0)
 		add_child(outline)
 		_outline_mi[coord] = outline
 
 		var fill := MeshInstance3D.new()
-		var fmesh := PlaneMesh.new()
-		fmesh.size = Vector2(fill_size, fill_size)
-		fill.mesh = fmesh
+		var fm := PlaneMesh.new()
+		fm.size = Vector2(fs, fs)
+		fill.mesh = fm
 		fill.position = ctr + Vector3(0.0, Y_FILL, 0.0)
+		var fmat := _mat(TeamColors.fill_color(grid.get_owner(coord)))
+		fill.material_override = fmat
 		add_child(fill)
 		_fill_mi[coord] = fill
+		_fill_mat[coord] = fmat
 
 		var lbl := Label3D.new()
 		lbl.text = "%d,%d" % [coord.x, coord.y]
@@ -75,9 +89,6 @@ func _build() -> void:
 		lbl.no_depth_test = true
 		_labels_root.add_child(lbl)
 
-		_recolor(coord)
-
-	# Distinct marker on the un-loseable spawn tiles.
 	for team in [TileGrid.TEAM1, TileGrid.TEAM2]:
 		var sc: Vector2i = grid.spawn[team]
 		var marker := MeshInstance3D.new()
@@ -88,15 +99,45 @@ func _build() -> void:
 		marker.material_override = _mat(Color(1, 1, 1, 1))
 		add_child(marker)
 
-func _recolor(coord: Vector2i) -> void:
-	var st: int = grid.get_owner(coord)
-	_fill_mi[coord].material_override = _mats[st]
-	_outline_mi[coord].material_override = _mats[3 + st]
+func _physics_process(_dt: float) -> void:
+	var presence := {}
+	if _player != null:
+		var coord: Vector2i = grid.topology.world_to_tile(_player.global_position)
+		if grid.topology.in_bounds(coord):
+			presence[TileGrid.TEAM1] = coord
+	var changed: bool = capture.step(presence, FIXED_DT)
 
-## Set a tile's owner and recolor (debug / future sim hook).
+	var act := {}
+	for c in capture.active_tiles():
+		act[c] = true
+	if changed:
+		_refresh_all()
+	else:
+		# Refresh fills that are or just stopped being captured.
+		for c in _prev_active.keys():
+			if not act.has(c):
+				_refresh_fill(c)
+		for c in act.keys():
+			_refresh_fill(c)
+	_prev_active = act
+
+func _refresh_all() -> void:
+	for coord in grid.topology.all_tiles():
+		_refresh_fill(coord)
+		_outline_mi[coord].material_override = _outline_mats[grid.outline_category(coord)]
+
+func _refresh_fill(coord: Vector2i) -> void:
+	var col := TeamColors.fill_color(grid.get_owner(coord))
+	var team: int = capture.progress_team(coord)
+	if team != 0:
+		var target := TeamColors.fill_color(TileGrid.NEUTRAL) if capture.progress_phase(coord) == Capture.PHASE_NEUTRALIZE else TeamColors.fill_color(team)
+		col = col.lerp(target, capture.progress_fraction(coord))
+	_fill_mat[coord].albedo_color = col
+
+## Set a tile's owner and refresh (debug / future sim hook).
 func set_tile(coord: Vector2i, team: int) -> void:
 	if grid.set_owner(coord, team):
-		_recolor(coord)
+		_refresh_all()
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event.is_action_pressed("debug_toggle_labels"):
