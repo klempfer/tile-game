@@ -92,5 +92,24 @@ func _run_suite() -> void:
 	var mag100 := _magnification(100.0, PlayerScript.ads_fov_for(100.0, 1.8))
 	_check("ads_zoom_slider_safe", absf(mag75 - 1.8) < 1e-3 and absf(mag100 - 1.8) < 1e-3, "(mag75=%.4f mag100=%.4f)" % [mag75, mag100])
 
+	# --- Sprint vs ADS mutual exclusion (most recent action wins) ---
+	var r1 := LocalInput.resolve_exclusive(true, false, true)   # sprinting, ADS turns on -> ADS wins
+	_check("ads_cancels_sprint", r1["ads"] and not r1["sprint"], "(%s)" % str(r1))
+	var r2 := LocalInput.resolve_exclusive(true, true, true)    # ADS on, sprint freshly pressed -> sprint wins
+	_check("sprint_cancels_ads", r2["sprint"] and not r2["ads"], "(%s)" % str(r2))
+	var r3 := LocalInput.resolve_exclusive(true, false, false)  # only sprint
+	_check("sprint_only", r3["sprint"] and not r3["ads"], "(%s)" % str(r3))
+	var r4 := LocalInput.resolve_exclusive(false, false, true)  # only ADS
+	_check("ads_only", r4["ads"] and not r4["sprint"], "(%s)" % str(r4))
+	var r5 := LocalInput.resolve_exclusive(false, false, false) # neither
+	_check("neither_sprint_nor_ads", not r5["sprint"] and not r5["ads"], "(%s)" % str(r5))
+
+	# --- Camera stays above ground when looking up; level look unaffected ---
+	var up_cam := PlayerScript.camera_position_grounded(Vector3(0, 0.05, 0), 0.0, PlayerScript.PITCH_LIMIT, 3.0, 1.6, 0.5, 0.4)
+	_check("camera_above_ground", up_cam.y >= 0.4 - 1e-4, "(y=%.3f)" % up_cam.y)
+	var lvl_g := PlayerScript.camera_position_grounded(Vector3.ZERO, 0.0, 0.0, 3.0, 1.6, 0.5, 0.4)
+	var lvl_p := PlayerScript.camera_position(Vector3.ZERO, 0.0, 0.0, 3.0, 1.6, 0.5)
+	_check("camera_ground_noop_level", lvl_g.distance_to(lvl_p) < 1e-5, "(d=%.6f)" % lvl_g.distance_to(lvl_p))
+
 func _magnification(base_fov: float, ads_fov: float) -> float:
 	return tan(deg_to_rad(base_fov) * 0.5) / tan(deg_to_rad(ads_fov) * 0.5)

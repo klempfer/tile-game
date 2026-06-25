@@ -26,19 +26,37 @@ func poll(_tick: int):
 	var stick := Input.get_vector("look_left", "look_right", "look_up", "look_down")
 	if Input.is_action_just_pressed("ads_toggle"):
 		_ads_toggle = not _ads_toggle
-	var ads := _ads_toggle or Input.is_action_pressed("ads_hold")
+	var ads_req := _ads_toggle or Input.is_action_pressed("ads_hold")
+
+	# Sprint and ADS are mutually exclusive — the most recently initiated wins.
+	var res := resolve_exclusive(Input.is_action_pressed("sprint"), Input.is_action_just_pressed("sprint"), ads_req)
+	var ads: bool = res["ads"]
+	var sprint: bool = res["sprint"]
+	if ads_req and not ads:
+		_ads_toggle = false  # a fresh sprint cancelled ADS; don't let the toggle re-pop
+
 	var look := look_delta(_mouse_accum, stick, DT, ads)
 	_mouse_accum = Vector2.ZERO
 	var buttons := 0
 	if Input.is_action_pressed("jump"):
 		buttons |= InputCommand.BTN_JUMP
-	if Input.is_action_pressed("sprint"):
+	if sprint:
 		buttons |= InputCommand.BTN_SPRINT
 	if Input.is_action_pressed("crouch"):
 		buttons |= InputCommand.BTN_CROUCH
 	if ads:
 		buttons |= InputCommand.BTN_ADS
 	return InputCommand.new(_tick, move, look, buttons)
+
+## Resolve sprint vs ADS mutual exclusion. Most recently initiated action wins: a
+## fresh sprint press cancels ADS; otherwise an active ADS suppresses sprint. Pure
+## (no Input) so it is unit-tested headlessly.
+static func resolve_exclusive(sprint_held: bool, sprint_pressed: bool, ads_in: bool) -> Dictionary:
+	var ads := ads_in
+	if sprint_pressed and ads:
+		ads = false
+	var sprint := sprint_held and not ads
+	return {"sprint": sprint, "ads": ads}
 
 ## Pure look-delta math (radians this tick): mouse px + stick, sensitivity and ADS
 ## scaling. yaw +: turn left (CCW); pitch +: look up. Unit-tested.

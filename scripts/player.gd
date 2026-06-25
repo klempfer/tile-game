@@ -22,6 +22,7 @@ const ADS_HEIGHT := 1.6
 const ADS_SHOULDER := 0.85      # shift camera right so the character clears the crosshair
 const ADS_ZOOM := 1.8           # on-screen magnification, relative to base FOV (FOV-slider-safe)
 const ADS_BLEND_SPEED := 8.0    # 1/sec; ~0.125s hip <-> ADS transition
+const CAM_MIN_Y := 0.4          # camera never dips below this height (flat ground at y=0)
 
 var _motion = PlayerMotion.new()
 var _provider = LocalInputProvider.new()
@@ -82,7 +83,7 @@ func _update_camera(ads: bool, dt: float) -> void:
 	# unchanged, so the crosshair (screen center) stays centered while ADS shifts
 	# the camera laterally right via the larger shoulder offset.
 	_camera.fov = lerpf(_base_fov, ads_fov_for(_base_fov, ADS_ZOOM), _ads_blend)
-	var cam_pos := camera_position(global_position, _yaw, _pitch, p["dist"], p["height"], p["shoulder"])
+	var cam_pos := camera_position_grounded(global_position, _yaw, _pitch, p["dist"], p["height"], p["shoulder"], CAM_MIN_Y)
 	_camera.global_position = cam_pos
 	_camera.look_at(cam_pos + look_forward(_yaw, _pitch), Vector3.UP)
 
@@ -97,6 +98,17 @@ static func look_right(yaw: float) -> Vector3:
 static func camera_position(origin: Vector3, yaw: float, pitch: float, dist: float, height: float, shoulder: float) -> Vector3:
 	var pivot := origin + Vector3(0.0, height, 0.0) + look_right(yaw) * shoulder
 	return pivot - look_forward(yaw, pitch) * dist
+
+## Like camera_position, but shortens the arm (toward the pivot) so the camera
+## never dips below min_y when looking up. A SpringArm-vs-flat-ground for now; real
+## collision against walls/terrain arrives with structures (M12). Aim is unchanged.
+static func camera_position_grounded(origin: Vector3, yaw: float, pitch: float, dist: float, height: float, shoulder: float, min_y: float) -> Vector3:
+	var pivot := origin + Vector3(0.0, height, 0.0) + look_right(yaw) * shoulder
+	var fwd := look_forward(yaw, pitch)
+	var d := dist
+	if fwd.y > 0.0 and pivot.y - fwd.y * d < min_y:
+		d = clampf((pivot.y - min_y) / fwd.y, 0.0, dist)
+	return pivot - fwd * d
 
 static func clamp_pitch(p: float) -> float:
 	return clampf(p, -PITCH_LIMIT, PITCH_LIMIT)
