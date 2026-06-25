@@ -24,6 +24,8 @@ const ADS_ZOOM := 1.8           # on-screen magnification, relative to base FOV 
 const ADS_BLEND_SPEED := 8.0    # 1/sec; ~0.125s hip <-> ADS transition
 const CAM_MIN_Y := 0.4          # camera never dips below this height (flat ground at y=0)
 
+@export var start_yaw := 0.0     # initial facing (radians); set per scene
+
 var _motion = PlayerMotion.new()
 var _provider = LocalInputProvider.new()
 var _tick := 0
@@ -38,6 +40,8 @@ var _base_fov := 75.0           # hip FOV; later driven by the Config FOV slider
 
 func _ready() -> void:
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	_yaw = start_yaw
+	rotation.y = _yaw
 	print("[Player] spawned at %v, active camera: %s" % [global_position, _camera.name])
 	_update_camera(false, 0.0)
 

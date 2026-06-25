@@ -20,6 +20,8 @@ static func ensure_default_actions() -> void:
 	# Aim down sights: Toggle = Right Mouse (GDD §17); Hold unbound by default.
 	_bind("ads_toggle", [_mouse(MOUSE_BUTTON_RIGHT)], [])
 	_bind("ads_hold",   [], [])
+	# Debug: toggle tile coordinate labels (M3).
+	_bind("debug_toggle_labels", [_key(KEY_F1)], [])
 
 static func _bind(action: String, keys: Array, joys: Array) -> void:
 	if InputMap.has_action(action):
