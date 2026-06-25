@@ -38,6 +38,8 @@ var _outline_mi: Dictionary = {}  # coord -> MeshInstance3D
 var _outline_mats: Array = []     # 4 shared materials indexed by category
 var _labels_root: Node3D
 var _prev_active: Dictionary = {}
+var _start_snapshot: Dictionary = {}  # M7 match-start ownership (incl. head-starts)
+var _capture_active := true            # M7: gated off during countdown / round-over
 
 func _ready() -> void:
 	DefaultBinds.ensure_default_actions()
@@ -63,6 +65,7 @@ func _ready() -> void:
 		_player.bind_world(grid, TileGrid.TEAM1)
 	if _bot != null and _bot.has_method("bind_world"):
 		_bot.bind_world(grid, TileGrid.TEAM2)
+	_start_snapshot = grid.snapshot()  # M7: match-start ownership to restore each round
 	_refresh_all()
 
 func _mat(c: Color) -> StandardMaterial3D:
@@ -120,7 +123,20 @@ func _build() -> void:
 		marker.material_override = _mat(Color(1, 1, 1, 1))
 		add_child(marker)
 
+## M7: the MatchDirector pauses capture during countdown / round-over / match-over.
+func set_capture_active(v: bool) -> void:
+	_capture_active = v
+
+## M7: restore the board to match-start ownership and clear capture progress.
+func reset_world() -> void:
+	grid.restore(_start_snapshot)
+	capture.reset()
+	_prev_active.clear()
+	_refresh_all()
+
 func _physics_process(_dt: float) -> void:
+	if not _capture_active:
+		return
 	var presence := {}
 	if _player != null:
 		var coord: Vector2i = grid.topology.world_to_tile(_player.global_position)

@@ -46,6 +46,7 @@ var _ads_blend := 0.0
 var _base_fov := 75.0           # hip FOV; later driven by the Config FOV slider
 var _grid = null                # bound TileGrid sim (M5); null in scenes without a grid
 var _team := 0                  # which team's walkable region restricts this player
+var active := true              # M7: false = frozen (countdown / round-over / match-over)
 
 @onready var _col: CollisionShape3D = $Collision
 @onready var _mesh: MeshInstance3D = $Mesh
@@ -83,7 +84,14 @@ func _input(event: InputEvent) -> void:
 		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE if Input.mouse_mode == Input.MOUSE_MODE_CAPTURED else Input.MOUSE_MODE_CAPTURED
 
 func _physics_process(_delta: float) -> void:
-	var cmd = _provider.poll(_tick)
+	var cmd = _provider.poll(_tick)  # poll even when frozen (drains the mouse accumulator)
+
+	if not active:
+		# M7 freeze (countdown / round-over / match-over): hold still on the floor.
+		velocity = Vector3.ZERO
+		move_and_slide()
+		_tick += 1
+		return
 
 	# Look (radians this tick) -> yaw/pitch. Body faces yaw (strafe-style).
 	_yaw = wrapf(_yaw + cmd.look.x, -PI, PI)
@@ -109,6 +117,21 @@ func _physics_process(_delta: float) -> void:
 func bind_world(grid, team: int) -> void:
 	_grid = grid
 	_team = team
+
+## Reset the actor to a spawn pose for a new round (M7). Clears motion/camera/crouch so
+## the round starts byte-identically to match start. The bound grid ref is unchanged.
+func reset_to_spawn(pos: Vector3, yaw: float) -> void:
+	global_position = pos
+	_yaw = yaw
+	_pitch = 0.0
+	rotation.y = _yaw
+	velocity = Vector3.ZERO
+	_motion.reset()
+	_ads_blend = 0.0
+	_tick = 0
+	_apply_crouch(false)
+	if is_local:
+		_update_camera(false, 0.0)
 
 ## Clamp this tick's horizontal move to the team's walkable tiles (M5). No-op until a
 ## world is bound. The clamp math is pure (MovementRestriction); here we just apply the

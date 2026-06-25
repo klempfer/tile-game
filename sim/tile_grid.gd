@@ -42,6 +42,14 @@ func set_owner(coord: Vector2i, team: int) -> bool:
 	_owner[coord] = team
 	return true
 
+## Full ownership snapshot / restore (M7 round reset). Snapshot is taken at match
+## start (so it includes any debug head-starts) and restored verbatim each round.
+func snapshot() -> Dictionary:
+	return _owner.duplicate()
+
+func restore(snap: Dictionary) -> void:
+	_owner = snap.duplicate()
+
 ## Stable hash of all ownership, for determinism checks.
 func owners_hash() -> int:
 	var s := ""

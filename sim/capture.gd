@@ -86,6 +86,12 @@ func step(presence: Dictionary, _dt: float) -> bool:
 			changed = true
 	return changed
 
+## Clear ALL in-progress captures (M7 round reset).
+func reset() -> void:
+	_progress.clear()
+	_pteam.clear()
+	_pphase.clear()
+
 func _reset(coord: Vector2i) -> void:
 	_progress.erase(coord)
 	_pteam.erase(coord)

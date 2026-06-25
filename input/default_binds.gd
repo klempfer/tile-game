@@ -26,6 +26,10 @@ static func ensure_default_actions() -> void:
 	_bind("debug_strand", [_key(KEY_F2)], [])
 	# Debug: toggle the top-down observation camera (M6).
 	_bind("debug_cam", [_key(KEY_F3)], [])
+	# Debug: award a round point (placeholder for M9 kills) + restart match (M7).
+	_bind("debug_point_team1", [_key(KEY_F4)], [])
+	_bind("debug_point_team2", [_key(KEY_F5)], [])
+	_bind("debug_restart_match", [_key(KEY_F6)], [])
 
 static func _bind(action: String, keys: Array, joys: Array) -> void:
 	if InputMap.has_action(action):

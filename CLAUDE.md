@@ -85,6 +85,7 @@ sim/               deterministic simulation (pure RefCounted; headlessly tested)
   tile_grid.gd       ownership state, spawns, is_unloseable, set_owner, outline_category
   capture.gd         integer-tick capture sim (capture/neutralize/contest/comeback/immunity)
   movement_restriction.gd  M5 walkable-region clamp (owned∪neighbors; margin inset; stranded free-roam)
+  match_state.gd     M7 deterministic match/round phase machine (countdown/active/over; points→round→match)
   team_colors.gd     customizable palette (static vars; blend derived)
 input/
   input_command.gd       per-tick intent: move_dir, look (rad), buttons bitmask (JUMP/SPRINT/CROUCH/ADS)
@@ -92,10 +93,11 @@ input/
   bot_input_provider.gd  M6 trivial bot: constant move_dir (default forward), zero look/buttons
   default_binds.gd       registers default InputMap actions at runtime (code defaults until Config menu)
 scripts/
-  player.gd          CharacterBody3D: provider→PlayerMotion→camera rig; M5 tile restriction; M6 is_local/bot
-  tile_grid_view.gd  tile visuals; drives capture from BOTH actors' presence; binds restriction; F1/F2/F3 debug
-scenes/             bootstrap, player, m1_movement, m2_camera, m3_grid, m4_capture, m5_movement, m6_two_actors (player.tscn shared)
-tests/              test_m0..m6 (.gd + .tscn), idle-print pattern
+  player.gd          CharacterBody3D: provider→PlayerMotion→camera rig; M5 restriction; M6 is_local/bot; M7 active/reset
+  tile_grid_view.gd  tile visuals; drives capture from BOTH actors; binds restriction; M7 snapshot/reset_world; F1/F2/F3 debug
+  match_director.gd  M7 per-tick orchestrator: drives MatchState, freezes actors + gates capture by phase, resets, debug HUD
+scenes/             bootstrap, player, m1_movement..m7_match (per milestone; player.tscn shared)
+tests/              test_m0..m7 (.gd + .tscn), idle-print pattern
 docs/GDD.md         authoritative spec
 ```
 
@@ -161,6 +163,15 @@ outlines are drawn from `cell_polygon` so hexes would render correctly.
   tile-by-tile (no AI; real AI is M14). `tile_grid_view` feeds BOTH actors' tile presence into
   `capture.step`. Live scene: blue local player vs red bot down column 5, debug head-starts so the
   fronts meet near mid-map; **F3** toggles a top-down observation camera.
+- **Match flow (M7):** `MatchState` (pure) = phases COUNTDOWN→ACTIVE→ROUND_OVER→(next round /
+  MATCH_OVER); **3 points win a round, first to 2 rounds wins the match** (GDD §14); 180-tick (3 s)
+  countdown + round-over freezes. `MatchDirector` (scene-root node, runs FIRST in tree so it gates
+  the same tick) ticks the state, sets each actor's `active` + `view.set_capture_active` by phase, and
+  on the `"round_reset"` event restores **match-start ownership snapshot** (`TileGrid.snapshot/restore`,
+  incl. debug head-starts) + `Capture.reset()` + `player.reset_to_spawn`. Points come from **debug
+  keys** standing in for M9 kills: **F4**/**F5** award Team 1/2 a point, **F6** restarts the match.
+  M9 kills will just call `MatchState.add_point(team)` — nothing else changes. Minimal on-screen Label
+  is a placeholder until the real HUD (M15).
 
 ---
 
@@ -177,18 +188,20 @@ outlines are drawn from `cell_polygon` so hexes would render correctly.
   slide), pure XZ / no height cap, stranded = free roam back to territory. Live with captures.
 - **M6** Second actor: `BotInputProvider` (trivial hold-forward) on a second `player.gd` instance;
   both actors' presence drive capture; creeping two-actor tile war; F3 top-down camera.
+- **M7** Match/round state machine (`MatchState`) + `MatchDirector` orchestrator: countdown/round/
+  match phases, freezes, and clean deterministic resets (tile snapshot + actor respawn). Debug F4/F5
+  points (placeholder for M9 kills), F6 restart. Foundations complete.
 
-All milestones have green self-tests (test_m0..m6) that pass twice byte-identically.
-
-**Foundations remaining:**
-- **M7 (NEXT)** Match/round state machine + clean resets (tiles + actors) → deterministic territory
-  sandbox. Reset must restore tile ownership AND re-place/re-bind both actors at spawn.
+All milestones have green self-tests (test_m0..m7) that pass twice byte-identically.
 
 **Feature layers (each opens with its own tuning questions):**
-- **M8** Weapons & firing (hitscan + projectile, seeded spread, ADS = no spread, falloff, headshots).
+- **M8 (NEXT)** Weapons & firing (hitscan + projectile, seeded spread, ADS = no spread, falloff,
+  headshots). Fire is an `InputCommand` button; spread via the seeded `Rng`. *Open:* all combat numbers.
 - **M9** Health / death / respawn (5 s invuln, broken by firing) + kills→score (3/round, 2 rounds/match).
-  *Also wire the M5 stranded damage-over-time here* (severe DoT while on an illegal tile until you
-  reach a legal one — the `_apply_tile_restriction` stranded branch in `player.gd` is the hook).
+  A kill calls `MatchState.add_point(team)` (the M7 scoring skeleton already handles round/match flow);
+  replace the F4/F5 debug points. *Also wire the M5 stranded damage-over-time here* (severe DoT while
+  on an illegal tile until you reach a legal one — the `_apply_tile_restriction` stranded branch in
+  `player.gd` is the hook).
 - **M10** Energy (200; sprint/dodge/shield/build; 0→2 s stun) + dodge roll + directional shield.
 - **M11** Detection (20 m, 50 m/1 s on fire, team-shared, 3 s linger, outlines + HP bars, indicator).
 - **M12** Structures (build radial menu; wall/turret/lookout; owned-tiles-only; persist; SpringArm
