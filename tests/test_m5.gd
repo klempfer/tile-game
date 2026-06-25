@@ -113,6 +113,15 @@ func _run_suite() -> void:
 	var outward := MR.clamp_move(band, Vector3(2.49, Y, -27.5), iso, topo, M)
 	_check("reentry_outward_held", _approx(outward["pos"].x, 2.45) and outward["hit_x"])
 
+	# Map border (separate from tile walls): a STRANDED actor roams freely on the map
+	# but cannot walk off the edge. Cell (1,5) center x=-20, map x in [-22.5, 22.5].
+	var empty: Dictionary = {}
+	var at_edge := Vector3(-20.0, Y, -27.5)  # illegal cell (empty walkable) -> stranded
+	var off := MR.clamp_move(at_edge, Vector3(-30.0, Y, -27.5), empty, topo, M)
+	_check("stranded_blocked_at_map_edge", off["stranded"] and _approx(off["pos"].x, -22.5 + M) and off["hit_x"], "(x=%.4f)" % off["pos"].x)
+	var onmap := MR.clamp_move(at_edge, Vector3(-18.0, Y, -27.5), empty, topo, M)
+	_check("stranded_inbounds_free", onmap["stranded"] and _approx(onmap["pos"].x, -18.0) and not onmap["hit_x"])
+
 func _approx(a: float, b: float) -> bool:
 	return absf(a - b) < 1e-5
 

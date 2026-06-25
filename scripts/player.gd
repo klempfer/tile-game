@@ -7,6 +7,7 @@ extends CharacterBody3D
 const InputCommand = preload("res://input/input_command.gd")
 const PlayerMotion = preload("res://sim/player_motion.gd")
 const LocalInputProvider = preload("res://input/local_input_provider.gd")
+const BotInputProvider = preload("res://input/bot_input_provider.gd")
 const MovementRestriction = preload("res://sim/movement_restriction.gd")
 
 const FIXED_DT := 1.0 / 60.0
@@ -31,9 +32,13 @@ const CAM_MIN_Y := 0.4          # camera never dips below this height (flat grou
 const BODY_MARGIN := 0.4
 
 @export var start_yaw := 0.0     # initial facing (radians); set per scene
+# M6: false = AI/bot actor — driven by BotInputProvider, no mouse capture, camera not
+# current. Defaults true so existing m1/m2/m4/m5 scenes stay the local player unchanged.
+@export var is_local := true
+@export var body_color := Color(0.2, 0.5, 1, 1)  # capsule tint (bot scene sets red)
 
 var _motion = PlayerMotion.new()
-var _provider = LocalInputProvider.new()
+var _provider = null              # set in _ready: Local (KB+M) or Bot, per is_local
 var _tick := 0
 var _yaw := 0.0
 var _pitch := 0.0
@@ -47,13 +52,30 @@ var _team := 0                  # which team's walkable region restricts this pl
 @onready var _camera: Camera3D = $Camera3D
 
 func _ready() -> void:
-	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+	if is_local:
+		_provider = LocalInputProvider.new()
+	else:
+		_provider = BotInputProvider.new()
+	_apply_body_color()
 	_yaw = start_yaw
 	rotation.y = _yaw
-	print("[Player] spawned at %v, active camera: %s" % [global_position, _camera.name])
-	_update_camera(false, 0.0)
+	if is_local:
+		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+		_camera.current = true   # explicit: win the active-camera race vs. the bot's
+		print("[Player] spawned at %v, active camera: %s" % [global_position, _camera.name])
+		_update_camera(false, 0.0)
+	else:
+		_camera.current = false  # avoid two cameras both current=true
+		print("[Bot] spawned at %v" % global_position)
+
+func _apply_body_color() -> void:
+	var m := StandardMaterial3D.new()
+	m.albedo_color = body_color
+	_mesh.material_override = m
 
 func _input(event: InputEvent) -> void:
+	if not is_local:
+		return  # bot has no mouse / BotInputProvider has no add_mouse_motion
 	if event is InputEventMouseMotion and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
 		_provider.add_mouse_motion((event as InputEventMouseMotion).relative)
 	elif event.is_action_pressed("ui_cancel"):
@@ -75,8 +97,9 @@ func _physics_process(_delta: float) -> void:
 	_apply_tile_restriction(from_pos)
 	_apply_crouch(_motion.crouching)
 
-	var ads: bool = (cmd.buttons & InputCommand.BTN_ADS) != 0
-	_update_camera(ads, FIXED_DT)
+	if is_local:
+		var ads: bool = (cmd.buttons & InputCommand.BTN_ADS) != 0
+		_update_camera(ads, FIXED_DT)
 	_tick += 1
 
 ## Bind the tile world so movement is restricted to `team`'s walkable region (M5).

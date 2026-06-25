@@ -55,6 +55,13 @@ When the user requests a change, explain the approach and **wait for "proceed"**
 - **Don't name a method `_set` (or other `Object` virtuals).** `_set(name, value)` is a built-in
   virtual; a helper named `_set` fails parse with "signature doesn't match the parent" (hit in M5 —
   renamed to `_dset`). Same care for `_get`, `_init`, `_ready`, etc.
+- **A ternary whose two branches are different script types warns** ("Values of the ternary operator
+  are not mutually compatible"; hit in M6 picking `LocalInputProvider`/`BotInputProvider`). Use a
+  plain `if/else` assignment instead — warnings show up in the MCP `errors` scrape.
+- **Sub-resources are SHARED across instances of a PackedScene by default.** Two `player.tscn`
+  instances shared one `CapsuleShape3D`/`CapsuleMesh`, so `_apply_crouch` mutating `.height` made the
+  two actors fight over it (M6 crouch bug). Set `resource_local_to_scene = true` on any sub-resource a
+  script mutates per-instance (or `.duplicate()` it in `_ready`).
 
 ## Running things via the Godot MCP
 
@@ -82,18 +89,21 @@ sim/               deterministic simulation (pure RefCounted; headlessly tested)
 input/
   input_command.gd       per-tick intent: move_dir, look (rad), buttons bitmask (JUMP/SPRINT/CROUCH/ADS)
   input_provider.gd      base; ScriptedInputProvider (tests/replay); LocalInputProvider (KB+M+pad)
+  bot_input_provider.gd  M6 trivial bot: constant move_dir (default forward), zero look/buttons
   default_binds.gd       registers default InputMap actions at runtime (code defaults until Config menu)
 scripts/
-  player.gd          CharacterBody3D: provider→PlayerMotion→camera rig; M5 tile restriction (bind_world)
-  tile_grid_view.gd  builds tile visuals, drives capture each tick from player presence, frontier outlines
-scenes/             bootstrap, player, m1_movement, m2_camera, m3_grid, m4_capture, m5_movement (player.tscn shared)
-tests/              test_m0..m5 (.gd + .tscn), idle-print pattern
+  player.gd          CharacterBody3D: provider→PlayerMotion→camera rig; M5 tile restriction; M6 is_local/bot
+  tile_grid_view.gd  tile visuals; drives capture from BOTH actors' presence; binds restriction; F1/F2/F3 debug
+scenes/             bootstrap, player, m1_movement, m2_camera, m3_grid, m4_capture, m5_movement, m6_two_actors (player.tscn shared)
+tests/              test_m0..m6 (.gd + .tscn), idle-print pattern
 docs/GDD.md         authoritative spec
 ```
 
 **Input → sim seam:** `LocalInputProvider.poll()` reads `Input` (the only place) and returns an
 `InputCommand`. Mouse look is fed in via `add_mouse_motion()` from the player's `_input`. Sprint and
 ADS are resolved to be mutually exclusive in the provider (`resolve_exclusive`, last action wins).
+**A bot is the same actor with a different provider** (`BotInputProvider`) — `player.gd`'s `is_local`
+flag only gates the local-only bits (mouse capture, camera). This is the netcode/replay seam.
 
 **Tile shape abstraction:** all grid logic goes through `TileTopology`; `SquareTopology` ships now, a
 `HexTopology` could drop in later with only a map regen. Adjacency = shares an edge (never diagonal);
@@ -139,9 +149,18 @@ outlines are drawn from `cell_polygon` so hexes would render correctly.
   free roam until you re-enter a legal cell, then it re-engages — you can never *walk* yourself
   stranded. The clamp is **no-pushback**: it only blocks advancing further into a wall, never shoves
   you back, so re-entry (and a tile flipping illegal next to you) is smooth — you land in the margin
-  band and the inset restores itself as you move inward (no inward snap). Future cross-tile cards make the target legal or grant a temporary travel-illegal override
-  (same bypass path as stranded). **Future M9:** severe damage-over-time while stranded. F2 debug =
-  collapse Team-1 territory to spawn (force a strand for playtesting).
+  band and the inset restores itself as you move inward (no inward snap). A separate **map border**
+  (`_clamp_to_map` vs `topology.world_aabb()`, inset by margin) is applied on *every* path including
+  stranded, so a stranded actor roams freely but can never walk off the map. Future cross-tile cards
+  make the target legal or grant a temporary travel-illegal override (same bypass path as stranded).
+  **Future M9:** severe damage-over-time while stranded. F2 debug = collapse Team-1 territory to
+  spawn (force a strand for playtesting).
+- **Second actor (M6):** the bot is the **same `player.gd` actor** with `is_local=false` →
+  `BotInputProvider` (constant forward), no mouse/camera capture, camera not current, capsule tinted
+  via `body_color`. The trivial "hold forward" + M5 restriction makes it creep its capture frontier
+  tile-by-tile (no AI; real AI is M14). `tile_grid_view` feeds BOTH actors' tile presence into
+  `capture.step`. Live scene: blue local player vs red bot down column 5, debug head-starts so the
+  fronts meet near mid-map; **F3** toggles a top-down observation camera.
 
 ---
 
@@ -156,13 +175,14 @@ outlines are drawn from `cell_polygon` so hexes would render correctly.
 - **M4** Capture / neutralize / contest / comeback / spawn-immunity + frontier outlines.
 - **M5** Movement restriction: walkable = owned ∪ edge-neighbors; margin-inset clamp (hard-stop +
   slide), pure XZ / no height cap, stranded = free roam back to territory. Live with captures.
+- **M6** Second actor: `BotInputProvider` (trivial hold-forward) on a second `player.gd` instance;
+  both actors' presence drive capture; creeping two-actor tile war; F3 top-down camera.
 
-All milestones have green self-tests (test_m0..m5) that pass twice byte-identically.
+All milestones have green self-tests (test_m0..m6) that pass twice byte-identically.
 
 **Foundations remaining:**
-- **M6 (NEXT)** Second actor via `BotInputProvider` (trivial) → observable two-actor tile war. The
-  bot binds `MovementRestriction` with `TEAM2` (the M5 clamp is already team-parameterized).
-- **M7** Match/round state machine + clean resets (tiles + actors) → deterministic territory sandbox.
+- **M7 (NEXT)** Match/round state machine + clean resets (tiles + actors) → deterministic territory
+  sandbox. Reset must restore tile ownership AND re-place/re-bind both actors at spawn.
 
 **Feature layers (each opens with its own tuning questions):**
 - **M8** Weapons & firing (hitscan + projectile, seeded spread, ADS = no spread, falloff, headshots).

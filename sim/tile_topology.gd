@@ -29,3 +29,8 @@ func cell_polygon(_coord: Vector2i) -> PackedVector3Array:
 ## Tiles sharing an edge with `coord` (never diagonal).
 func edge_neighbors(_coord: Vector2i) -> Array:
 	return []
+
+## World-space axis-aligned bounds of the whole map (y flattened to 0). The map border
+## (separate from per-tile walls) is clamped against this — see MovementRestriction.
+func world_aabb() -> AABB:
+	return AABB()

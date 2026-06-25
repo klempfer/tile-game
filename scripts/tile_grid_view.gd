@@ -19,12 +19,19 @@ const Y_LABEL := 0.15
 const FIXED_DT := 1.0 / 60.0
 
 @export var player_path: NodePath
+@export var bot_path: NodePath                    # M6 Team-2 actor (BotInputProvider)
 @export var debug_enemy_patch := false
-@export var debug_prowned: Array[Vector2i] = []  # Team-1 pre-owned tiles (M5 test region)
+@export var debug_prowned: Array[Vector2i] = []        # Team-1 pre-owned tiles (M5/M6 head start)
+@export var debug_prowned_team2: Array[Vector2i] = []  # Team-2 pre-owned tiles (M6 head start)
+@export var overhead_cam_path: NodePath           # M6 top-down observation camera (F3 toggle)
+@export var player_cam_path: NodePath             # the local player's shoulder camera
 
 var grid
 var capture
 var _player: Node3D
+var _bot: Node3D
+var _overhead_cam: Camera3D
+var _player_cam: Camera3D
 var _fill_mi: Dictionary = {}     # coord -> MeshInstance3D
 var _fill_mat: Dictionary = {}    # coord -> StandardMaterial3D (own, for progress blend)
 var _outline_mi: Dictionary = {}  # coord -> MeshInstance3D
@@ -37,19 +44,25 @@ func _ready() -> void:
 	grid = TileGrid.new(SquareTopology.new(9, 20, 5.0))
 	capture = Capture.new(grid)
 	_player = get_node_or_null(player_path) as Node3D
+	_bot = get_node_or_null(bot_path) as Node3D
+	_overhead_cam = get_node_or_null(overhead_cam_path) as Camera3D
+	_player_cam = get_node_or_null(player_cam_path) as Camera3D
 	_build()
 	if debug_enemy_patch:
 		# Team-2 tiles near the player so neutralizing is testable before the real
 		# enemy actor (M6).
 		for c in [Vector2i(4, 4), Vector2i(5, 4), Vector2i(6, 4)]:
 			grid.set_owner(c, TileGrid.TEAM2)
-	# M5: pre-own a test region so the movement restriction has something to feel
-	# (slide along edges, concave-corner stop) without waiting on live captures.
+	# M5/M6: pre-own head-start regions (movement-restriction feel / shorter front).
 	for c in debug_prowned:
 		grid.set_owner(c, TileGrid.TEAM1)
-	# M5: restrict the local player to Team 1's walkable region.
+	for c in debug_prowned_team2:
+		grid.set_owner(c, TileGrid.TEAM2)
+	# M5/M6: restrict each actor to its team's walkable region.
 	if _player != null and _player.has_method("bind_world"):
 		_player.bind_world(grid, TileGrid.TEAM1)
+	if _bot != null and _bot.has_method("bind_world"):
+		_bot.bind_world(grid, TileGrid.TEAM2)
 	_refresh_all()
 
 func _mat(c: Color) -> StandardMaterial3D:
@@ -113,6 +126,10 @@ func _physics_process(_dt: float) -> void:
 		var coord: Vector2i = grid.topology.world_to_tile(_player.global_position)
 		if grid.topology.in_bounds(coord):
 			presence[TileGrid.TEAM1] = coord
+	if _bot != null:
+		var bcoord: Vector2i = grid.topology.world_to_tile(_bot.global_position)
+		if grid.topology.in_bounds(bcoord):
+			presence[TileGrid.TEAM2] = bcoord
 	var changed: bool = capture.step(presence, FIXED_DT)
 
 	var act := {}
@@ -157,3 +174,10 @@ func _unhandled_input(event: InputEvent) -> void:
 			if grid.get_owner(coord) == TileGrid.TEAM1:
 				grid.set_owner(coord, TileGrid.NEUTRAL)  # spawn is un-loseable -> ignored
 		_refresh_all()
+	elif event.is_action_pressed("debug_cam"):
+		# M6: toggle the top-down observation camera <-> the player's shoulder camera.
+		if _overhead_cam != null and _player_cam != null:
+			if _overhead_cam.current:
+				_player_cam.current = true
+			else:
+				_overhead_cam.current = true

@@ -57,3 +57,6 @@ func edge_neighbors(coord: Vector2i) -> Array:
 		if in_bounds(n):
 			out.append(n)
 	return out
+
+func world_aabb() -> AABB:
+	return AABB(Vector3(-_half_w, 0.0, -_half_l), Vector3(2.0 * _half_w, 0.0, 2.0 * _half_l))

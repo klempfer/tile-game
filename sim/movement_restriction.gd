@@ -44,9 +44,11 @@ static func is_walkable(walkable: Dictionary, coord: Vector2i) -> bool:
 ## center-point). Returns {pos, hit_x, hit_z, stranded}. Vertical (y) is untouched.
 static func clamp_move(from: Vector3, to: Vector3, walkable: Dictionary, topology, margin: float) -> Dictionary:
 	var cur: Vector2i = topology.world_to_tile(from)
-	# Stranded: on an illegal cell (a tile flipped under us) -> no clamp, free roam.
+	# Stranded: on an illegal cell (a tile flipped under us) -> no tile clamp, free roam.
+	# The map border still applies, so a stranded actor can roam but never walk off the map.
 	if not walkable.has(cur):
-		return {"pos": to, "hit_x": false, "hit_z": false, "stranded": true}
+		var mpos := _clamp_to_map(to, topology, margin)
+		return {"pos": mpos, "hit_x": not is_equal_approx(mpos.x, to.x), "hit_z": not is_equal_approx(mpos.z, to.z), "stranded": true}
 
 	# Axis-aligned bounds + center of the current cell from its boundary polygon.
 	var poly: PackedVector3Array = topology.cell_polygon(cur)
@@ -99,6 +101,20 @@ static func clamp_move(from: Vector3, to: Vector3, walkable: Dictionary, topolog
 
 	var nx := clampf(to.x, lo_x, hi_x)
 	var nz := clampf(to.z, lo_z, hi_z)
-	var hit_x: bool = not is_equal_approx(nx, to.x)
-	var hit_z: bool = not is_equal_approx(nz, to.z)
-	return {"pos": Vector3(nx, to.y, nz), "hit_x": hit_x, "hit_z": hit_z, "stranded": false}
+	# Map border (separate from the tile walls) — also keeps the body on the play area.
+	var mapped := _clamp_to_map(Vector3(nx, to.y, nz), topology, margin)
+	var hit_x: bool = not is_equal_approx(mapped.x, to.x)
+	var hit_z: bool = not is_equal_approx(mapped.z, to.z)
+	return {"pos": mapped, "hit_x": hit_x, "hit_z": hit_z, "stranded": false}
+
+## Hard-clamp a position to the map's world AABB, inset by `margin` so the whole body
+## stays on the play area. Applied on every path (including stranded) — a map border
+## that is independent of the per-tile walkable walls. No-op if the topology reports no
+## bounds (empty AABB).
+static func _clamp_to_map(p: Vector3, topology, margin: float) -> Vector3:
+	var ab: AABB = topology.world_aabb()
+	if ab.size == Vector3.ZERO:
+		return p
+	var lo := ab.position
+	var hi := ab.position + ab.size
+	return Vector3(clampf(p.x, lo.x + margin, hi.x - margin), p.y, clampf(p.z, lo.z + margin, hi.z - margin))

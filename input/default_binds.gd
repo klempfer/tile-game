@@ -24,6 +24,8 @@ static func ensure_default_actions() -> void:
 	_bind("debug_toggle_labels", [_key(KEY_F1)], [])
 	# Debug: collapse Team 1 territory to spawn to test stranded free-roam (M5).
 	_bind("debug_strand", [_key(KEY_F2)], [])
+	# Debug: toggle the top-down observation camera (M6).
+	_bind("debug_cam", [_key(KEY_F3)], [])
 
 static func _bind(action: String, keys: Array, joys: Array) -> void:
 	if InputMap.has_action(action):
