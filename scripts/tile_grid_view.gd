@@ -20,6 +20,7 @@ const FIXED_DT := 1.0 / 60.0
 
 @export var player_path: NodePath
 @export var debug_enemy_patch := false
+@export var debug_prowned: Array[Vector2i] = []  # Team-1 pre-owned tiles (M5 test region)
 
 var grid
 var capture
@@ -42,6 +43,13 @@ func _ready() -> void:
 		# enemy actor (M6).
 		for c in [Vector2i(4, 4), Vector2i(5, 4), Vector2i(6, 4)]:
 			grid.set_owner(c, TileGrid.TEAM2)
+	# M5: pre-own a test region so the movement restriction has something to feel
+	# (slide along edges, concave-corner stop) without waiting on live captures.
+	for c in debug_prowned:
+		grid.set_owner(c, TileGrid.TEAM1)
+	# M5: restrict the local player to Team 1's walkable region.
+	if _player != null and _player.has_method("bind_world"):
+		_player.bind_world(grid, TileGrid.TEAM1)
 	_refresh_all()
 
 func _mat(c: Color) -> StandardMaterial3D:
@@ -142,3 +150,10 @@ func set_tile(coord: Vector2i, team: int) -> void:
 func _unhandled_input(event: InputEvent) -> void:
 	if event.is_action_pressed("debug_toggle_labels"):
 		_labels_root.visible = not _labels_root.visible
+	elif event.is_action_pressed("debug_strand"):
+		# M5 playtest: collapse Team 1's territory to spawn so a player out in the
+		# field is left on an illegal tile -> stranded free-roam back to base.
+		for coord in grid.topology.all_tiles():
+			if grid.get_owner(coord) == TileGrid.TEAM1:
+				grid.set_owner(coord, TileGrid.NEUTRAL)  # spawn is un-loseable -> ignored
+		_refresh_all()

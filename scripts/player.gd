@@ -7,6 +7,7 @@ extends CharacterBody3D
 const InputCommand = preload("res://input/input_command.gd")
 const PlayerMotion = preload("res://sim/player_motion.gd")
 const LocalInputProvider = preload("res://input/local_input_provider.gd")
+const MovementRestriction = preload("res://sim/movement_restriction.gd")
 
 const FIXED_DT := 1.0 / 60.0
 const STAND_HEIGHT := 1.8
@@ -24,6 +25,11 @@ const ADS_ZOOM := 1.8           # on-screen magnification, relative to base FOV 
 const ADS_BLEND_SPEED := 8.0    # 1/sec; ~0.125s hip <-> ADS transition
 const CAM_MIN_Y := 0.4          # camera never dips below this height (flat ground at y=0)
 
+# M5 movement restriction: inset the body from disallowed tile edges. = capsule
+# radius so the whole capsule stays on legal tiles. Single knob for footprint feel —
+# set 0.0 for center-point (position-only) restriction.
+const BODY_MARGIN := 0.4
+
 @export var start_yaw := 0.0     # initial facing (radians); set per scene
 
 var _motion = PlayerMotion.new()
@@ -33,6 +39,8 @@ var _yaw := 0.0
 var _pitch := 0.0
 var _ads_blend := 0.0
 var _base_fov := 75.0           # hip FOV; later driven by the Config FOV slider
+var _grid = null                # bound TileGrid sim (M5); null in scenes without a grid
+var _team := 0                  # which team's walkable region restricts this player
 
 @onready var _col: CollisionShape3D = $Collision
 @onready var _mesh: MeshInstance3D = $Mesh
@@ -62,12 +70,38 @@ func _physics_process(_delta: float) -> void:
 
 	_motion.tick(cmd, FIXED_DT, is_on_floor(), _yaw)
 	velocity = _motion.velocity
+	var from_pos := global_position
 	move_and_slide()
+	_apply_tile_restriction(from_pos)
 	_apply_crouch(_motion.crouching)
 
 	var ads: bool = (cmd.buttons & InputCommand.BTN_ADS) != 0
 	_update_camera(ads, FIXED_DT)
 	_tick += 1
+
+## Bind the tile world so movement is restricted to `team`'s walkable region (M5).
+## Called by the tile grid view; scenes without a grid never bind, so the clamp stays
+## off there (m1/m2 movement/camera scenes are unaffected). The player holds the pure
+## TileGrid sim object, not the view node — keeps the input->sim seam clean.
+func bind_world(grid, team: int) -> void:
+	_grid = grid
+	_team = team
+
+## Clamp this tick's horizontal move to the team's walkable tiles (M5). No-op until a
+## world is bound. The clamp math is pure (MovementRestriction); here we just apply the
+## result and kill the into-wall velocity component for a clean hard stop. When
+## stranded (current cell illegal after a tile flip) nothing is clamped — free roam —
+## and that branch is where the M9 stranded damage-over-time will later hook in.
+func _apply_tile_restriction(from_pos: Vector3) -> void:
+	if _grid == null:
+		return
+	var walkable := MovementRestriction.walkable_cells(_grid, _team)
+	var r := MovementRestriction.clamp_move(from_pos, global_position, walkable, _grid.topology, BODY_MARGIN)
+	global_position = r["pos"]
+	if r["hit_x"]:
+		velocity.x = 0.0
+	if r["hit_z"]:
+		velocity.z = 0.0
 
 func _apply_crouch(crouched: bool) -> void:
 	var h := CROUCH_HEIGHT if crouched else STAND_HEIGHT
