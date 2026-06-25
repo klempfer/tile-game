@@ -41,7 +41,7 @@ When the user requests a change, explain the approach and **wait for "proceed"**
 - **Target Godot 4.7 APIs.** Keyboard+mouse default; **controller support required** (abstracted in
   the input layer from M1; verify KB+M every milestone, one dedicated controller pass later).
 
-## Godot/GDScript gotchas (all hit during M0–M7)
+## Godot/GDScript gotchas (all hit during M0–M5)
 
 - **Use `preload("res://...")` + `extends "res://..."`, NOT `class_name`.** A never-opened project
   has no global class cache, so `class_name` identifiers fail in headless CLI runs ("Identifier …

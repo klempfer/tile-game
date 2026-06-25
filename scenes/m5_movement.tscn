@@ -1,0 +1,38 @@
+[gd_scene load_steps=5 format=3]
+
+[ext_resource type="PackedScene" path="res://scenes/player.tscn" id="player"]
+[ext_resource type="Script" path="res://scripts/tile_grid_view.gd" id="view"]
+
+[sub_resource type="Environment" id="env"]
+background_mode = 1
+background_color = Color(0.5, 0.62, 0.78, 1)
+ambient_light_source = 2
+ambient_light_color = Color(1, 1, 1, 1)
+ambient_light_energy = 0.45
+
+[sub_resource type="BoxShape3D" id="groundshape"]
+size = Vector3(45, 1, 100)
+
+[node name="M5Movement" type="Node3D"]
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("env")
+
+[node name="Sun" type="DirectionalLight3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 0.6, -0.8, 0, 0.8, 0.6, 0, 10, 0)
+light_energy = 1.1
+
+[node name="GroundBody" type="StaticBody3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.5, 0)
+
+[node name="GroundCol" type="CollisionShape3D" parent="GroundBody"]
+shape = SubResource("groundshape")
+
+[node name="TileGrid" type="Node3D" parent="."]
+script = ExtResource("view")
+player_path = NodePath("../Player")
+debug_prowned = Array[Vector2i]([Vector2i(5, 2), Vector2i(5, 3), Vector2i(5, 4), Vector2i(5, 5), Vector2i(6, 5), Vector2i(7, 5), Vector2i(8, 5)])
+
+[node name="Player" parent="." instance=ExtResource("player")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.05, -47.5)
+start_yaw = 3.14159

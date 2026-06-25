@@ -20,6 +20,16 @@ static func ensure_default_actions() -> void:
 	# Aim down sights: Toggle = Right Mouse (GDD §17); Hold unbound by default.
 	_bind("ads_toggle", [_mouse(MOUSE_BUTTON_RIGHT)], [])
 	_bind("ads_hold",   [], [])
+	# Debug: toggle tile coordinate labels (M3).
+	_bind("debug_toggle_labels", [_key(KEY_F1)], [])
+	# Debug: collapse Team 1 territory to spawn to test stranded free-roam (M5).
+	_bind("debug_strand", [_key(KEY_F2)], [])
+	# Debug: toggle the top-down observation camera (M6).
+	_bind("debug_cam", [_key(KEY_F3)], [])
+	# Debug: award a round point (placeholder for M9 kills) + restart match (M7).
+	_bind("debug_point_team1", [_key(KEY_F4)], [])
+	_bind("debug_point_team2", [_key(KEY_F5)], [])
+	_bind("debug_restart_match", [_key(KEY_F6)], [])
 
 static func _bind(action: String, keys: Array, joys: Array) -> void:
 	if InputMap.has_action(action):
