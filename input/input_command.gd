@@ -13,6 +13,10 @@ const BTN_JUMP := 1 << 0
 const BTN_SPRINT := 1 << 1
 const BTN_CROUCH := 1 << 2
 const BTN_ADS := 1 << 3
+const BTN_FIRE := 1 << 4       # M8
+const BTN_RELOAD := 1 << 5     # M8
+const BTN_WEAPON1 := 1 << 6    # M8: select weapon 1 this tick
+const BTN_WEAPON2 := 1 << 7    # M8: select weapon 2 this tick
 
 var tick: int = 0
 var move_dir: Vector2 = Vector2.ZERO  # local-space intended move (x = strafe, y = forward)

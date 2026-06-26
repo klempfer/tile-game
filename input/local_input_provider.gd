@@ -46,6 +46,15 @@ func poll(_tick: int):
 		buttons |= InputCommand.BTN_CROUCH
 	if ads:
 		buttons |= InputCommand.BTN_ADS
+	# M8 combat: Fire auto-repeats (held); reload + weapon select are edge-triggered.
+	if Input.is_action_pressed("fire"):
+		buttons |= InputCommand.BTN_FIRE
+	if Input.is_action_just_pressed("reload"):
+		buttons |= InputCommand.BTN_RELOAD
+	if Input.is_action_just_pressed("weapon_1"):
+		buttons |= InputCommand.BTN_WEAPON1
+	if Input.is_action_just_pressed("weapon_2"):
+		buttons |= InputCommand.BTN_WEAPON2
 	return InputCommand.new(_tick, move, look, buttons)
 
 ## Resolve sprint vs ADS mutual exclusion. Most recently initiated action wins: a

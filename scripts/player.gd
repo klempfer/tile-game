@@ -9,6 +9,8 @@ const PlayerMotion = preload("res://sim/player_motion.gd")
 const LocalInputProvider = preload("res://input/local_input_provider.gd")
 const BotInputProvider = preload("res://input/bot_input_provider.gd")
 const MovementRestriction = preload("res://sim/movement_restriction.gd")
+const WeaponLoadout = preload("res://sim/weapon_loadout.gd")
+const WeaponDefs = preload("res://sim/weapon_defs.gd")
 
 const FIXED_DT := 1.0 / 60.0
 const STAND_HEIGHT := 1.8
@@ -47,6 +49,8 @@ var _base_fov := 75.0           # hip FOV; later driven by the Config FOV slider
 var _grid = null                # bound TileGrid sim (M5); null in scenes without a grid
 var _team := 0                  # which team's walkable region restricts this player
 var active := true              # M7: false = frozen (countdown / round-over / match-over)
+var _loadout = WeaponLoadout.new()   # M8: per-actor fire/ammo/reload/switch state
+var _pending_shots: Array = []       # M8: shots fired this tick, drained by the combat director
 
 @onready var _col: CollisionShape3D = $Collision
 @onready var _mesh: MeshInstance3D = $Mesh
@@ -104,6 +108,7 @@ func _physics_process(_delta: float) -> void:
 	move_and_slide()
 	_apply_tile_restriction(from_pos)
 	_apply_crouch(_motion.crouching)
+	_fire(cmd)  # M8: tick the loadout; queue a shot if it fired (not gated by is_local — netcode-clean)
 
 	if is_local:
 		var ads: bool = (cmd.buttons & InputCommand.BTN_ADS) != 0
@@ -129,9 +134,61 @@ func reset_to_spawn(pos: Vector3, yaw: float) -> void:
 	_motion.reset()
 	_ads_blend = 0.0
 	_tick = 0
+	_loadout.reset()       # M8: fresh weapon / full mags each round
+	_pending_shots.clear()
 	_apply_crouch(false)
 	if is_local:
 		_update_camera(false, 0.0)
+
+## M8: advance the weapon state machine from this tick's command and, if it fired,
+## queue a Shot for the combat director to resolve. The muzzle/aim origin is the eye
+## (no shoulder parallax — bullets follow the crosshair); spread/ADS resolve centrally.
+## Firing is deliberately NOT gated by is_local: a bot is the same actor with a
+## different provider (it just emits no fire button yet), keeping the netcode seam clean.
+func _fire(cmd) -> void:
+	var fire_held: bool = (cmd.buttons & InputCommand.BTN_FIRE) != 0
+	var reload_pressed: bool = (cmd.buttons & InputCommand.BTN_RELOAD) != 0
+	var switch_to := -1
+	if (cmd.buttons & InputCommand.BTN_WEAPON1) != 0:
+		switch_to = WeaponDefs.REVOLVER
+	elif (cmd.buttons & InputCommand.BTN_WEAPON2) != 0:
+		switch_to = WeaponDefs.BOLT
+	var r: Dictionary = _loadout.step(fire_held, reload_pressed, switch_to)
+	if r["fired"]:
+		# Two-trace aim (M8 fix): the shot carries the muzzle (eye), the camera/crosshair
+		# ray (through the rig pivot, along look_forward), and ADS. The combat director
+		# converges the muzzle shot onto whatever the crosshair covers, killing the
+		# third-person muzzle-vs-camera parallax. Pivot uses the live ADS-blended rig so it
+		# matches what the player sees.
+		var rig := rig_params(_ads_blend)
+		_pending_shots.append({
+			"weapon": int(r["weapon"]),
+			"muzzle": global_position + Vector3(0.0, WeaponDefs.EYE_HEIGHT, 0.0),
+			"cam_origin": global_position + Vector3(0.0, rig["height"], 0.0) + look_right(_yaw) * rig["shoulder"],
+			"cam_dir": look_forward(_yaw, _pitch),
+			"ads": (cmd.buttons & InputCommand.BTN_ADS) != 0,
+			"team": _team,
+			"tick": _tick,
+		})
+
+## M8: hand the combat director the shots fired this tick (and clear them).
+func consume_shots() -> Array:
+	var s := _pending_shots
+	_pending_shots = []
+	return s
+
+## M8: this actor's capsule as an enemy hitbox {pos (feet), radius, height (reflects crouch)}.
+func hitbox() -> Dictionary:
+	var shape := _col.shape as CapsuleShape3D
+	return {"pos": global_position, "radius": shape.radius, "height": shape.height}
+
+## M8: which team this actor fights for (bound via bind_world in M5); 0 if unbound.
+func team_id() -> int:
+	return _team
+
+## M8: the live weapon loadout (for the HUD readout: current weapon / ammo / reload).
+func loadout():
+	return _loadout
 
 ## Clamp this tick's horizontal move to the team's walkable tiles (M5). No-op until a
 ## world is bound. The clamp math is pure (MovementRestriction); here we just apply the

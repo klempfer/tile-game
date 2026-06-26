@@ -1,0 +1,97 @@
+[gd_scene load_steps=7 format=3]
+
+[ext_resource type="PackedScene" path="res://scenes/player.tscn" id="player"]
+[ext_resource type="Script" path="res://scripts/tile_grid_view.gd" id="view"]
+[ext_resource type="Script" path="res://scripts/match_director.gd" id="director"]
+[ext_resource type="Script" path="res://scripts/combat_director.gd" id="combat"]
+
+[sub_resource type="Environment" id="env"]
+background_mode = 1
+background_color = Color(0.5, 0.62, 0.78, 1)
+ambient_light_source = 2
+ambient_light_color = Color(1, 1, 1, 1)
+ambient_light_energy = 0.45
+
+[sub_resource type="BoxShape3D" id="groundshape"]
+size = Vector3(45, 1, 100)
+
+[node name="M8Combat" type="Node3D"]
+
+[node name="MatchDirector" type="Node" parent="."]
+script = ExtResource("director")
+view_path = NodePath("../TileGrid")
+player_path = NodePath("../Player")
+bot_path = NodePath("../Bot")
+hud_label_path = NodePath("../HUD/StatusLabel")
+combat_path = NodePath("../Combat")
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("env")
+
+[node name="Sun" type="DirectionalLight3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 0.6, -0.8, 0, 0.8, 0.6, 0, 10, 0)
+light_energy = 1.1
+
+[node name="GroundBody" type="StaticBody3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, -0.5, 0)
+
+[node name="GroundCol" type="CollisionShape3D" parent="GroundBody"]
+shape = SubResource("groundshape")
+
+[node name="OverheadCam" type="Camera3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 0, 1, 0, -1, 0, 0, 80, 0)
+fov = 75.0
+
+[node name="TileGrid" type="Node3D" parent="."]
+script = ExtResource("view")
+player_path = NodePath("../Player")
+bot_path = NodePath("../Bot")
+debug_prowned = Array[Vector2i]([Vector2i(5, 2), Vector2i(5, 3), Vector2i(5, 4), Vector2i(5, 5), Vector2i(5, 6), Vector2i(5, 7)])
+debug_prowned_team2 = Array[Vector2i]([Vector2i(5, 19), Vector2i(5, 18), Vector2i(5, 17), Vector2i(5, 16), Vector2i(5, 15), Vector2i(5, 14)])
+overhead_cam_path = NodePath("../OverheadCam")
+player_cam_path = NodePath("../Player/Camera3D")
+
+[node name="Player" parent="." instance=ExtResource("player")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.05, -47.5)
+start_yaw = 3.14159
+
+[node name="Bot" parent="." instance=ExtResource("player")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.05, 47.5)
+start_yaw = 0.0
+is_local = false
+body_color = Color(0.9, 0.2, 0.2, 1)
+
+[node name="Combat" type="Node3D" parent="."]
+script = ExtResource("combat")
+player_path = NodePath("../Player")
+bot_path = NodePath("../Bot")
+
+[node name="HUD" type="CanvasLayer" parent="."]
+
+[node name="StatusLabel" type="Label" parent="HUD"]
+offset_left = 14.0
+offset_top = 10.0
+offset_right = 520.0
+offset_bottom = 160.0
+theme_override_colors/font_color = Color(1, 1, 1, 1)
+theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
+theme_override_constants/outline_size = 4
+theme_override_font_sizes/font_size = 18
+text = "match starting…"
+
+[node name="Crosshair" type="Label" parent="HUD"]
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -10.0
+offset_top = -16.0
+offset_right = 10.0
+offset_bottom = 16.0
+theme_override_colors/font_color = Color(1, 1, 1, 1)
+theme_override_colors/font_outline_color = Color(0, 0, 0, 1)
+theme_override_constants/outline_size = 4
+theme_override_font_sizes/font_size = 26
+text = "+"
+horizontal_alignment = 1
+vertical_alignment = 1

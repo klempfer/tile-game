@@ -41,7 +41,7 @@ When the user requests a change, explain the approach and **wait for "proceed"**
 - **Target Godot 4.7 APIs.** Keyboard+mouse default; **controller support required** (abstracted in
   the input layer from M1; verify KB+M every milestone, one dedicated controller pass later).
 
-## Godot/GDScript gotchas (all hit during M0–M5)
+## Godot/GDScript gotchas (all hit during M0–M8)
 
 - **Use `preload("res://...")` + `extends "res://..."`, NOT `class_name`.** A never-opened project
   has no global class cache, so `class_name` identifiers fail in headless CLI runs ("Identifier …
@@ -62,6 +62,13 @@ When the user requests a change, explain the approach and **wait for "proceed"**
   instances shared one `CapsuleShape3D`/`CapsuleMesh`, so `_apply_crouch` mutating `.height` made the
   two actors fight over it (M6 crouch bug). Set `resource_local_to_scene = true` on any sub-resource a
   script mutates per-instance (or `.duplicate()` it in `_ready`).
+- **Don't shadow built-in functions / `Object` methods / sibling methods with a var or param name.**
+  All emit warnings that show up in the MCP `errors` scrape (M8): a var named `minf` shadows the
+  global `minf()`; a `for tr in …` iterator shadows `Object.tr()`; a param named `team` shadowed our
+  own `team()` method (→ renamed it `team_id()`). Pick non-colliding names.
+- **A running MCP instance does NOT hot-reload your edits.** After editing a script, `stop_project`
+  then `run_project` again — otherwise `get_debug_output`/`finalOutput` reflects the OLD code (bit us
+  mid-M8: a "still failing" test was just the stale process).
 
 ## Running things via the Godot MCP
 
@@ -87,17 +94,21 @@ sim/               deterministic simulation (pure RefCounted; headlessly tested)
   movement_restriction.gd  M5 walkable-region clamp (owned∪neighbors; margin inset; stranded free-roam)
   match_state.gd     M7 deterministic match/round phase machine (countdown/active/over; points→round→match)
   team_colors.gd     customizable palette (static vars; blend derived)
+  weapon_defs.gd     M8 weapon stat table (revolver hitscan / bolt projectile) + combat consts (DATA)
+  weapon_loadout.gd  M8 per-actor fire-rate/ammo/reload/switch state machine (integer ticks; pure)
+  ballistics.gd      M8 pure shot math: spread, ray-capsule hitscan, projectile step, falloff, headshot, aim_direction (two-trace)
 input/
-  input_command.gd       per-tick intent: move_dir, look (rad), buttons bitmask (JUMP/SPRINT/CROUCH/ADS)
+  input_command.gd       per-tick intent: move_dir, look (rad), buttons bitmask (JUMP/SPRINT/CROUCH/ADS + M8 FIRE/RELOAD/WEAPON1/WEAPON2)
   input_provider.gd      base; ScriptedInputProvider (tests/replay); LocalInputProvider (KB+M+pad)
-  bot_input_provider.gd  M6 trivial bot: constant move_dir (default forward), zero look/buttons
+  bot_input_provider.gd  M6 trivial bot: constant move_dir (default forward), zero look/buttons (never fires yet)
   default_binds.gd       registers default InputMap actions at runtime (code defaults until Config menu)
 scripts/
-  player.gd          CharacterBody3D: provider→PlayerMotion→camera rig; M5 restriction; M6 is_local/bot; M7 active/reset
+  player.gd          CharacterBody3D: provider→PlayerMotion→camera rig; M5 restriction; M6 is_local/bot; M7 active/reset; M8 WeaponLoadout + queues Shots
   tile_grid_view.gd  tile visuals; drives capture from BOTH actors; binds restriction; M7 snapshot/reset_world; F1/F2/F3 debug
-  match_director.gd  M7 per-tick orchestrator: drives MatchState, freezes actors + gates capture by phase, resets, debug HUD
-scenes/             bootstrap, player, m1_movement..m7_match (per milestone; player.tscn shared)
-tests/              test_m0..m7 (.gd + .tscn), idle-print pattern
+  match_director.gd  M7 per-tick orchestrator: drives MatchState, freezes actors + gates capture/combat by phase, resets, debug HUD (+ M8 weapon/ammo line)
+  combat_director.gd M8 resolver: collects both actors' Shots, converges aim, resolves hitscan + steps projectiles vs enemy capsule, logs damage, spawns tracers/markers; phase-gated
+scenes/             bootstrap, player, m1_movement..m7_match, m8_combat (per milestone; player.tscn shared)
+tests/              test_m0..m7, test_m8 (pure sim) + test_m8_integration (combat node wiring) (.gd + .tscn), idle-print pattern
 docs/GDD.md         authoritative spec
 ```
 
@@ -110,6 +121,15 @@ flag only gates the local-only bits (mouse capture, camera). This is the netcode
 **Tile shape abstraction:** all grid logic goes through `TileTopology`; `SquareTopology` ships now, a
 `HexTopology` could drop in later with only a map regen. Adjacency = shares an edge (never diagonal);
 outlines are drawn from `cell_polygon` so hexes would render correctly.
+
+**Combat seam (M8):** firing is just `InputCommand` buttons. Each tick `player.gd._fire()` steps its
+pure `WeaponLoadout`; when it fires it queues a **Shot** dict `{weapon, muzzle (eye), cam_origin (rig
+pivot), cam_dir (look_forward), ads, team, tick}` into `_pending_shots`. The scene-level
+`CombatDirector` (driven like `tile_grid_view`: phase-gated by `MatchDirector.set_active`, runs after
+the actors so it sees this tick's shots) drains both actors' `consume_shots()`, resolves them via the
+pure `Ballistics`, logs damage (no HP until M9), and owns projectile state + placeholder visuals.
+Firing is **not** gated by `is_local` (a bot would fire the same way — it just emits no fire button
+yet), so the netcode/replay seam stays clean. Spread draws from `Rng.stream("weapon_spread")`.
 
 ---
 
@@ -172,6 +192,24 @@ outlines are drawn from `cell_polygon` so hexes would render correctly.
   keys** standing in for M9 kills: **F4**/**F5** award Team 1/2 a point, **F6** restarts the match.
   M9 kills will just call `MatchState.add_point(team)` — nothing else changes. Minimal on-screen Label
   is a placeholder until the real HUD (M15).
+- **Weapons & firing (M8):** two weapons, switched with **1 / 2** (`weapon_1`/`weapon_2` actions).
+  **Revolver** (hitscan, single-shot): 26 dmg, 1.5× headshot, fire every 30 ticks, mag 6, reload 96
+  ticks, hip-cone 3°, falloff 100%≤10 m→40% at ≥30 m. **Bolt** (straight-line projectile, no gravity,
+  45 m/s, radius 0.25, life 180 ticks): 45 dmg, 1.5× headshot, fire every 48 ticks, mag 4, reload 132
+  ticks, hip-cone 2°, falloff 100%≤15 m→50% at ≥35 m. ADS = **no spread** (keys off the `BTN_ADS`
+  command bit, frame-exact). Damage is calibrated to an **assumed 100 HP** (real base HP + final TTK
+  tuning are M9). Headshot = top 0.45 m of the capsule. **Magazine + reload** (`R`; empty trigger
+  auto-reloads; can't fire mid-reload; switching cancels a reload but keeps the fire-rate cooldown).
+  **No HP yet** — hits are computed (falloff + headshot) and **logged** (`[COMBAT] …`) + shown on the
+  HUD, with placeholder tracers (yellow line), in-flight projectile spheres, and red hit-markers; a
+  **missed projectile despawns after its life (180 ticks)** — verified, never persists. **No recoil**
+  yet → **M8.5**. **Third-person aim = two-trace** (fixes muzzle-vs-camera parallax): trace #1 from the
+  rig **pivot** along `look_forward` finds what the crosshair covers (enemy capsule via `ray_capsule`,
+  else a far point); trace #2 fires from the eye-muzzle toward that point (`Ballistics.aim_direction`),
+  so shots converge on the crosshair. Starting trace #1 at the pivot is also the "closest-point-to-
+  player" guard (no shooting backward through yourself); a small `TRACE_BACK` handles a muzzle already
+  overlapping the target. Controls added: **LMB** fire, **R** reload, **1/2** weapon select (controller
+  binds deferred to the controller pass).
 
 ---
 
@@ -191,12 +229,22 @@ outlines are drawn from `cell_polygon` so hexes would render correctly.
 - **M7** Match/round state machine (`MatchState`) + `MatchDirector` orchestrator: countdown/round/
   match phases, freezes, and clean deterministic resets (tile snapshot + actor respawn). Debug F4/F5
   points (placeholder for M9 kills), F6 restart. Foundations complete.
+- **M8** Weapons & firing: revolver (hitscan) + bolt (projectile), seeded hip-fire spread, ADS = no
+  spread, falloff, headshots, magazine + reload, weapon switch (1/2), tracers/markers, damage logged
+  (no HP yet). Pure sim (`weapon_defs`/`weapon_loadout`/`ballistics`) + `CombatDirector` node, phase-
+  gated. Two-trace aim convergence fixes third-person muzzle-vs-camera parallax. *Built; test_m8 16/16
+  + test_m8_integration 5/5 twice byte-identical; core playtest signed off — only the user's final
+  visual confirmation of the aim fix is outstanding.*
 
-All milestones have green self-tests (test_m0..m7) that pass twice byte-identically.
+All milestones have green self-tests (test_m0..m8 + test_m8_integration) that pass twice byte-identically.
 
 **Feature layers (each opens with its own tuning questions):**
-- **M8 (NEXT)** Weapons & firing (hitscan + projectile, seeded spread, ADS = no spread, falloff,
-  headshots). Fire is an `InputCommand` button; spread via the seeded `Rng`. *Open:* all combat numbers.
+- **M8.5 (NEXT — gate before M9)** Recoil pass. Deliberately sequenced after the firing/hit pipeline
+  is proven. Opens with its own tuning questions (per-weapon kick magnitude pitch/yaw, fixed vs seeded
+  pattern via `Rng.stream("weapon_recoil")`, recovery rate, ADS reduction). Likely shape: a pure
+  `sim/recoil.gd` (RefCounted, integer-tick) applied through `player.gd`'s existing `_yaw`/`_pitch`
+  look channel; per-weapon numbers added to `weapon_defs.gd`; determinism + recovery unit-tested.
+  **M9 must not begin until this is built, verified, and signed off.**
 - **M9** Health / death / respawn (5 s invuln, broken by firing) + kills→score (3/round, 2 rounds/match).
   A kill calls `MatchState.add_point(team)` (the M7 scoring skeleton already handles round/match flow);
   replace the F4/F5 debug points. *Also wire the M5 stranded damage-over-time here* (severe DoT while

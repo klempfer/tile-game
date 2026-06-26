@@ -11,17 +11,20 @@ extends Node
 
 const MatchState = preload("res://sim/match_state.gd")
 const DefaultBinds = preload("res://input/default_binds.gd")
+const WeaponDefs = preload("res://sim/weapon_defs.gd")
 
 @export var view_path: NodePath
 @export var player_path: NodePath
 @export var bot_path: NodePath
 @export var hud_label_path: NodePath
+@export var combat_path: NodePath          # M8 combat resolver (optional; null in m7 scene)
 
 var _state
 var _view: Node
 var _player: Node3D
 var _bot: Node3D
 var _hud: Label
+var _combat: Node                          # M8: CombatDirector, gated like the view
 var _p_pos: Vector3
 var _p_yaw: float
 var _b_pos: Vector3
@@ -34,6 +37,7 @@ func _ready() -> void:
 	_player = get_node(player_path) as Node3D
 	_bot = get_node(bot_path) as Node3D
 	_hud = get_node_or_null(hud_label_path) as Label
+	_combat = get_node_or_null(combat_path)
 	# Record spawn poses (the scene already places actors at match start).
 	_p_pos = _player.global_position
 	_p_yaw = _player.start_yaw
@@ -55,11 +59,15 @@ func _apply_phase() -> void:
 	_player.active = active
 	_bot.active = active
 	_view.set_capture_active(active)
+	if _combat != null:
+		_combat.set_active(active)
 
 func _reset_world() -> void:
 	_view.reset_world()
 	_player.reset_to_spawn(_p_pos, _p_yaw)
 	_bot.reset_to_spawn(_b_pos, _b_yaw)
+	if _combat != null:
+		_combat.reset()
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event.is_action_pressed("debug_point_team1"):
@@ -77,12 +85,25 @@ func _unhandled_input(event: InputEvent) -> void:
 func _update_hud() -> void:
 	if _hud == null:
 		return
-	_hud.text = "%s   round %d\nrounds  T1 %d : %d T2\npoints  T1 %d : %d T2%s\n[F4] T1 point  [F5] T2 point  [F6] restart" % [
+	_hud.text = "%s   round %d\nrounds  T1 %d : %d T2\npoints  T1 %d : %d T2%s%s\n[F4] T1 point  [F5] T2 point  [F6] restart" % [
 		_phase_label(), _state.round_index,
 		_state.round_wins[MatchState.TEAM1], _state.round_wins[MatchState.TEAM2],
 		_state.points[MatchState.TEAM1], _state.points[MatchState.TEAM2],
-		_winner_suffix(),
+		_winner_suffix(), _weapon_line(),
 	]
+
+## M8 HUD line: local player's selected weapon / ammo / reload + the latest hit. Empty
+## in scenes without weapons (m7), so this director stays usable there.
+func _weapon_line() -> String:
+	if _player == null or not _player.has_method("loadout"):
+		return ""
+	var lo = _player.loadout()
+	var wname: String = WeaponDefs.get_def(lo.current)["name"]
+	var status: String = "  RELOADING" if lo.reloading() else ""
+	var ev := ""
+	if _combat != null and _combat.last_event != "":
+		ev = "\nlast hit: %s" % _combat.last_event
+	return "\nweapon  %s   ammo %d%s%s" % [wname, lo.ammo(), status, ev]
 
 func _phase_label() -> String:
 	match _state.phase:

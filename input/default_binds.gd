@@ -20,6 +20,12 @@ static func ensure_default_actions() -> void:
 	# Aim down sights: Toggle = Right Mouse (GDD §17); Hold unbound by default.
 	_bind("ads_toggle", [_mouse(MOUSE_BUTTON_RIGHT)], [])
 	_bind("ads_hold",   [], [])
+	# Combat (M8): Fire = Left Mouse (GDD §17); Reload = R; weapon select = 1 / 2.
+	# Controller bindings land in the dedicated controller pass (actions stay abstracted).
+	_bind("fire",     [_mouse(MOUSE_BUTTON_LEFT)], [])
+	_bind("reload",   [_key(KEY_R)], [])
+	_bind("weapon_1", [_key(KEY_1)], [])
+	_bind("weapon_2", [_key(KEY_2)], [])
 	# Debug: toggle tile coordinate labels (M3).
 	_bind("debug_toggle_labels", [_key(KEY_F1)], [])
 	# Debug: collapse Team 1 territory to spawn to test stranded free-roam (M5).
