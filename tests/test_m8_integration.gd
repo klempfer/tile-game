@@ -113,3 +113,38 @@ func _run() -> void:
 	combat._actors = [s2, target]
 	combat._physics_process(0.0)
 	_check("inactive_no_resolve", combat.last_event == "", combat.last_event)
+
+	# Muzzle (bullet origin) tracks the crouch: a real player instance, crouched/uncrouched, moves its
+	# $Muzzle marker down/up with the stance instead of leaving it pinned at standing eye height.
+	var PlayerScene := preload("res://scenes/player.tscn")
+	var p = PlayerScene.instantiate()
+	p.is_local = false   # bot: no mouse capture / camera grab in a headless test
+	add_child(p)
+	var stand_muzzle: float = p._muzzle_origin().y - p.global_position.y
+	p._apply_crouch(true)
+	var crouch_muzzle: float = p._muzzle_origin().y - p.global_position.y
+	p._apply_crouch(false)
+	var restand_muzzle: float = p._muzzle_origin().y - p.global_position.y
+	p.queue_free()
+	# Standing eye = 1.6; crouched drops by (STAND-CROUCH) = 0.6 -> 1.0; uncrouch restores 1.6.
+	_check("muzzle_follows_crouch",
+		is_equal_approx(stand_muzzle, 1.6) and is_equal_approx(crouch_muzzle, 1.0)
+		and crouch_muzzle < stand_muzzle and is_equal_approx(restand_muzzle, 1.6),
+		"stand=%.2f crouch=%.2f restand=%.2f" % [stand_muzzle, crouch_muzzle, restand_muzzle])
+
+	# Crouch lowers the shot's convergence pivot (cam_origin) by CROUCH_CAM_DROP, identical to the
+	# rendered camera height — this is what keeps aim convergence correct while crouched. The recoil
+	# AOP is untouched (crouch is a camera translation, not an aim-angle change).
+	var pc = PlayerScene.instantiate()
+	pc.is_local = false
+	add_child(pc)
+	pc._queue_shot(WeaponDefs.REVOLVER, false)
+	var stand_cam: float = pc.consume_shots()[0]["cam_origin"].y - pc.global_position.y
+	pc._crouch_blend = 1.0   # fully crouched
+	pc._queue_shot(WeaponDefs.REVOLVER, false)
+	var crouch_cam: float = pc.consume_shots()[0]["cam_origin"].y - pc.global_position.y
+	pc.queue_free()
+	# Standing cam pivot = HIP_HEIGHT (1.6); crouched drops by CROUCH_CAM_DROP (0.6) -> 1.0.
+	_check("crouch_lowers_cam_origin",
+		is_equal_approx(stand_cam, 1.6) and is_equal_approx(crouch_cam, 1.0) and crouch_cam < stand_cam,
+		"stand=%.2f crouch=%.2f" % [stand_cam, crouch_cam])

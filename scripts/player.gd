@@ -11,6 +11,7 @@ const BotInputProvider = preload("res://input/bot_input_provider.gd")
 const MovementRestriction = preload("res://sim/movement_restriction.gd")
 const WeaponLoadout = preload("res://sim/weapon_loadout.gd")
 const WeaponDefs = preload("res://sim/weapon_defs.gd")
+const Recoil = preload("res://sim/recoil.gd")
 
 const FIXED_DT := 1.0 / 60.0
 const STAND_HEIGHT := 1.8
@@ -27,6 +28,11 @@ const ADS_SHOULDER := 0.85      # shift camera right so the character clears the
 const ADS_ZOOM := 1.8           # on-screen magnification, relative to base FOV (FOV-slider-safe)
 const ADS_BLEND_SPEED := 8.0    # 1/sec; ~0.125s hip <-> ADS transition
 const CAM_MIN_Y := 0.4          # camera never dips below this height (flat ground at y=0)
+# Crouch camera: lower the viewpoint to the crouched stance. Camera-drop only — the reticle then
+# points lower in the world via parallax and recoil/AOP stay untouched (crouch = translation, AOP =
+# angle; orthogonal). Both knobs are independently tunable.
+const CROUCH_CAM_DROP := 0.6    # how far the camera lowers when fully crouched (= STAND-CROUCH height)
+const CROUCH_BLEND_SPEED := 8.0 # 1/sec; ~0.125s stand <-> crouch camera ease (matches ADS)
 
 # M5 movement restriction: inset the body from disallowed tile edges. = capsule
 # radius so the whole capsule stays on legal tiles. Single knob for footprint feel —
@@ -45,16 +51,24 @@ var _tick := 0
 var _yaw := 0.0
 var _pitch := 0.0
 var _ads_blend := 0.0
+var _crouch_blend := 0.0        # 0 = standing, 1 = crouched; eases the camera down (visual, like ADS)
 var _base_fov := 75.0           # hip FOV; later driven by the Config FOV slider
 var _grid = null                # bound TileGrid sim (M5); null in scenes without a grid
 var _team := 0                  # which team's walkable region restricts this player
 var active := true              # M7: false = frozen (countdown / round-over / match-over)
 var _loadout = WeaponLoadout.new()   # M8: per-actor fire/ammo/reload/switch state
 var _pending_shots: Array = []       # M8: shots fired this tick, drained by the combat director
+var _recoil = Recoil.new()           # M8.5: aim-punch + AOP recovery, through the look channel
 
 @onready var _col: CollisionShape3D = $Collision
 @onready var _mesh: MeshInstance3D = $Mesh
 @onready var _camera: Camera3D = $Camera3D
+# M8.5: bullet-origin marker. A real node (not a computed point) so that once character + weapon
+# models exist it can be parented under the weapon — its global_position then tracks the actual muzzle
+# through any animation for free. For the placeholder capsule its height follows the crouch (see
+# _apply_crouch). get_node_or_null keeps older scenes safe; _muzzle_origin() falls back to a computed
+# eye point if absent.
+@onready var _muzzle: Marker3D = get_node_or_null("Muzzle")
 
 func _ready() -> void:
 	if is_local:
@@ -97,9 +111,12 @@ func _physics_process(_delta: float) -> void:
 		_tick += 1
 		return
 
-	# Look (radians this tick) -> yaw/pitch. Body faces yaw (strafe-style).
-	_yaw = wrapf(_yaw + cmd.look.x, -PI, PI)
-	_pitch = clampf(_pitch + cmd.look.y, -PITCH_LIMIT, PITCH_LIMIT)
+	# Look (radians this tick) -> yaw/pitch. Body faces yaw (strafe-style). M8.5: the wrap/clamp lives
+	# in Recoil.apply_look so recoil tracks the ACTUAL (post-clamp) reticle movement, not raw input
+	# (matters at the pitch limit / aiming at the ground); it returns the actual delta for AOP tracking.
+	var look_res := Recoil.apply_look(_yaw, _pitch, cmd.look, PITCH_LIMIT)
+	_yaw = look_res["yaw"]
+	_pitch = look_res["pitch"]
 	rotation.y = _yaw
 
 	_motion.tick(cmd, FIXED_DT, is_on_floor(), _yaw)
@@ -108,7 +125,7 @@ func _physics_process(_delta: float) -> void:
 	move_and_slide()
 	_apply_tile_restriction(from_pos)
 	_apply_crouch(_motion.crouching)
-	_fire(cmd)  # M8: tick the loadout; queue a shot if it fired (not gated by is_local — netcode-clean)
+	_fire(cmd, look_res["delta"])  # M8/M8.5: fire decision -> shot (pre-impulse) -> recoil via look channel
 
 	if is_local:
 		var ads: bool = (cmd.buttons & InputCommand.BTN_ADS) != 0
@@ -133,9 +150,11 @@ func reset_to_spawn(pos: Vector3, yaw: float) -> void:
 	velocity = Vector3.ZERO
 	_motion.reset()
 	_ads_blend = 0.0
+	_crouch_blend = 0.0
 	_tick = 0
 	_loadout.reset()       # M8: fresh weapon / full mags each round
 	_pending_shots.clear()
+	_recoil.reset()        # M8.5: clear AOP / recovery state for the new round
 	_apply_crouch(false)
 	if is_local:
 		_update_camera(false, 0.0)
@@ -145,7 +164,7 @@ func reset_to_spawn(pos: Vector3, yaw: float) -> void:
 ## (no shoulder parallax — bullets follow the crosshair); spread/ADS resolve centrally.
 ## Firing is deliberately NOT gated by is_local: a bot is the same actor with a
 ## different provider (it just emits no fire button yet), keeping the netcode seam clean.
-func _fire(cmd) -> void:
+func _fire(cmd, player_delta: Vector2) -> void:
 	var fire_held: bool = (cmd.buttons & InputCommand.BTN_FIRE) != 0
 	var reload_pressed: bool = (cmd.buttons & InputCommand.BTN_RELOAD) != 0
 	var switch_to := -1
@@ -153,23 +172,40 @@ func _fire(cmd) -> void:
 		switch_to = WeaponDefs.REVOLVER
 	elif (cmd.buttons & InputCommand.BTN_WEAPON2) != 0:
 		switch_to = WeaponDefs.BOLT
+	elif (cmd.buttons & InputCommand.BTN_WEAPON3) != 0:
+		switch_to = WeaponDefs.SMG
 	var r: Dictionary = _loadout.step(fire_held, reload_pressed, switch_to)
+	# M8.5 first-shot-true: build the shot from the CURRENT (pre-impulse) aim, then apply recoil.
 	if r["fired"]:
-		# Two-trace aim (M8 fix): the shot carries the muzzle (eye), the camera/crosshair
-		# ray (through the rig pivot, along look_forward), and ADS. The combat director
-		# converges the muzzle shot onto whatever the crosshair covers, killing the
-		# third-person muzzle-vs-camera parallax. Pivot uses the live ADS-blended rig so it
-		# matches what the player sees.
-		var rig := rig_params(_ads_blend)
-		_pending_shots.append({
-			"weapon": int(r["weapon"]),
-			"muzzle": global_position + Vector3(0.0, WeaponDefs.EYE_HEIGHT, 0.0),
-			"cam_origin": global_position + Vector3(0.0, rig["height"], 0.0) + look_right(_yaw) * rig["shoulder"],
-			"cam_dir": look_forward(_yaw, _pitch),
-			"ads": (cmd.buttons & InputCommand.BTN_ADS) != 0,
-			"team": _team,
-			"tick": _tick,
-		})
+		_queue_shot(int(r["weapon"]), (cmd.buttons & InputCommand.BTN_ADS) != 0)
+	# M8.5 recoil through the look channel: an impulse on a firing tick, AOP tracking + recovery
+	# otherwise. The AOP is credited by ACTUAL post-clamp aim deltas (robust at the pitch limit).
+	# Not gated by is_local — a bot would recoil the same way (it just emits no fire/look yet).
+	var cur_def := WeaponDefs.get_def(_loadout.current)
+	var rc := _recoil.update(player_delta, bool(r["fired"]), cur_def, _loadout.current, Rng.stream("weapon_recoil"), _yaw, _pitch, PITCH_LIMIT)
+	_yaw = rc["yaw"]
+	_pitch = rc["pitch"]
+	rotation.y = _yaw
+
+## M8: queue a Shot for the combat director from the current aim (pre-recoil-impulse, so the first
+## shot is true). Two-trace aim: the shot carries the muzzle (eye), the camera/crosshair ray (through
+## the rig pivot, along look_forward), and ADS; the combat director converges the muzzle shot onto
+## whatever the crosshair covers, killing the third-person muzzle-vs-camera parallax. The pivot uses
+## the live ADS-blended rig so it matches what the player sees.
+func _queue_shot(weapon: int, ads: bool) -> void:
+	var rig := rig_params(_ads_blend)
+	# Crouch-lowered pivot height, identical to the rendered camera (see _update_camera) so the
+	# crosshair ray (trace #1) starts at the real camera pivot and convergence stays correct.
+	var cam_height: float = rig["height"] - _crouch_blend * CROUCH_CAM_DROP
+	_pending_shots.append({
+		"weapon": weapon,
+		"muzzle": _muzzle_origin(),
+		"cam_origin": global_position + Vector3(0.0, cam_height, 0.0) + look_right(_yaw) * rig["shoulder"],
+		"cam_dir": look_forward(_yaw, _pitch),
+		"ads": ads,
+		"team": _team,
+		"tick": _tick,
+	})
 
 ## M8: hand the combat director the shots fired this tick (and clear them).
 func consume_shots() -> Array:
@@ -189,6 +225,10 @@ func team_id() -> int:
 ## M8: the live weapon loadout (for the HUD readout: current weapon / ammo / reload).
 func loadout():
 	return _loadout
+
+## M8.5: the live recoil state machine (for the debug HUD readout: state / displacement).
+func recoil():
+	return _recoil
 
 ## Clamp this tick's horizontal move to the team's walkable tiles (M5). No-op until a
 ## world is bound. The clamp math is pure (MovementRestriction); here we just apply the
@@ -216,15 +256,40 @@ func _apply_crouch(crouched: bool) -> void:
 		if m:
 			m.height = h
 		_mesh.position.y = h * 0.5
+		# Keep the bullet-origin marker pinned to the (now changed) stance height. With a real weapon
+		# model the muzzle node would ride the animation instead of this manual update.
+		if _muzzle != null:
+			_muzzle.position.y = _eye_height()
+
+## Current eye / weapon-muzzle height above the feet, following the crouch — a constant offset below
+## the head crown (STAND_HEIGHT-EYE_HEIGHT), so it stays just below the head whether standing or crouched.
+func _eye_height() -> float:
+	var shape := _col.shape as CapsuleShape3D
+	var h: float = shape.height if shape else STAND_HEIGHT
+	return h - (STAND_HEIGHT - WeaponDefs.EYE_HEIGHT)
+
+## Bullet origin = the weapon muzzle, read from the $Muzzle marker so it tracks the real muzzle once
+## models/animation exist (parent the marker under the weapon then; this script needs no change). The
+## placeholder marker's height is kept in sync with the crouch by _apply_crouch. Combat keeps a small
+## TRACE_BACK behind this point so a target right up against the muzzle still registers. Falls back to a
+## computed eye point if a scene lacks the marker.
+func _muzzle_origin() -> Vector3:
+	if _muzzle != null:
+		return _muzzle.global_position
+	return global_position + Vector3(0.0, _eye_height(), 0.0)
 
 func _update_camera(ads: bool, dt: float) -> void:
 	_ads_blend = move_toward(_ads_blend, 1.0 if ads else 0.0, ADS_BLEND_SPEED * dt)
+	_crouch_blend = move_toward(_crouch_blend, 1.0 if _motion.crouching else 0.0, CROUCH_BLEND_SPEED * dt)
 	var p := rig_params(_ads_blend)
 	# Zoom from FOV only (magnification relative to base FOV); aim direction is
 	# unchanged, so the crosshair (screen center) stays centered while ADS shifts
 	# the camera laterally right via the larger shoulder offset.
 	_camera.fov = lerpf(_base_fov, ads_fov_for(_base_fov, ADS_ZOOM), _ads_blend)
-	var cam_pos := camera_position_grounded(global_position, _yaw, _pitch, p["dist"], p["height"], p["shoulder"], CAM_MIN_Y)
+	# Crouch lowers the pivot height (camera-drop only — reticle points lower via parallax; aim angle
+	# and recoil AOP are untouched). The shot's cam_origin uses the SAME drop so convergence holds.
+	var cam_height: float = p["height"] - _crouch_blend * CROUCH_CAM_DROP
+	var cam_pos := camera_position_grounded(global_position, _yaw, _pitch, p["dist"], cam_height, p["shoulder"], CAM_MIN_Y)
 	_camera.global_position = cam_pos
 	_camera.look_at(cam_pos + look_forward(_yaw, _pitch), Vector3.UP)
 

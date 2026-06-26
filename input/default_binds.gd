@@ -26,6 +26,7 @@ static func ensure_default_actions() -> void:
 	_bind("reload",   [_key(KEY_R)], [])
 	_bind("weapon_1", [_key(KEY_1)], [])
 	_bind("weapon_2", [_key(KEY_2)], [])
+	_bind("weapon_3", [_key(KEY_3)], [])   # M8.5 SMG (full-auto test weapon)
 	# Debug: toggle tile coordinate labels (M3).
 	_bind("debug_toggle_labels", [_key(KEY_F1)], [])
 	# Debug: collapse Team 1 territory to spawn to test stranded free-roam (M5).

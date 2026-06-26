@@ -32,8 +32,36 @@ func _vec_eq(a: Vector3, b: Vector3, eps := 0.0001) -> bool:
 
 func _run_suite() -> void:
 	_test_loadout()
+	_test_smg()
 	_test_ballistics()
 	_test_aim_convergence()
+
+# --- SMG (M8.5 full-auto test weapon): 900 rpm = every 4 ticks, 30-round mag ---
+
+func _test_smg() -> void:
+	var smg := WeaponDefs.get_def(WeaponDefs.SMG)
+	var fire_ticks: int = smg["fire_ticks"]   # 4 (900 rpm)
+	var mag: int = smg["mag"]                  # 30
+
+	# Fire-rate gating after selecting the SMG: fires on tick 0 then every fire_ticks.
+	var lo := WeaponLoadout.new()
+	lo.step(false, false, WeaponDefs.SMG)      # select SMG (no fire)
+	var hits: Array = []
+	for t in 3 * fire_ticks + 1:               # 13 ticks
+		var r: Dictionary = lo.step(true, false, -1)
+		if r["fired"]:
+			hits.append(t)
+	_check("smg_fire_rate", hits == [0, fire_ticks, 2 * fire_ticks, 3 * fire_ticks], str(hits))
+
+	# The full 30-round magazine empties at that rate.
+	var lo2 := WeaponLoadout.new()
+	lo2.step(false, false, WeaponDefs.SMG)
+	var fired_count := 0
+	for t in (mag - 1) * fire_ticks + 1:
+		var r2: Dictionary = lo2.step(true, false, -1)
+		if r2["fired"]:
+			fired_count += 1
+	_check("smg_mag", fired_count == mag and lo2.ammo() == 0, "fired=%d ammo=%d" % [fired_count, lo2.ammo()])
 
 # --- WeaponLoadout (fire-rate / magazine / reload / switch), integer ticks ---
 

@@ -103,7 +103,12 @@ func _weapon_line() -> String:
 	var ev := ""
 	if _combat != null and _combat.last_event != "":
 		ev = "\nlast hit: %s" % _combat.last_event
-	return "\nweapon  %s   ammo %d%s%s" % [wname, lo.ammo(), status, ev]
+	# M8.5 debug: recoil state + displacement magnitude (degrees) of the local player.
+	var rcl := ""
+	if _player.has_method("recoil"):
+		var rc = _player.recoil()
+		rcl = "\nrecoil  %s   off %.1f°" % [rc.state_name(), rad_to_deg(rc.displacement().length())]
+	return "\nweapon  %s   ammo %d%s%s%s" % [wname, lo.ammo(), status, ev, rcl]
 
 func _phase_label() -> String:
 	match _state.phase:

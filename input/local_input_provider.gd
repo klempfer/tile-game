@@ -55,6 +55,8 @@ func poll(_tick: int):
 		buttons |= InputCommand.BTN_WEAPON1
 	if Input.is_action_just_pressed("weapon_2"):
 		buttons |= InputCommand.BTN_WEAPON2
+	if Input.is_action_just_pressed("weapon_3"):
+		buttons |= InputCommand.BTN_WEAPON3
 	return InputCommand.new(_tick, move, look, buttons)
 
 ## Resolve sprint vs ADS mutual exclusion. Most recently initiated action wins: a
