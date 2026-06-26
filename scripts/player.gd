@@ -12,6 +12,11 @@ const MovementRestriction = preload("res://sim/movement_restriction.gd")
 const WeaponLoadout = preload("res://sim/weapon_loadout.gd")
 const WeaponDefs = preload("res://sim/weapon_defs.gd")
 const Recoil = preload("res://sim/recoil.gd")
+const Health = preload("res://sim/health.gd")
+
+## M9: emitted once when this actor's HP hits 0. `killer_team` is the shooter's team for a weapon
+## kill, or the enemy team for a stranded "territory" death. MatchDirector connects this to scoring.
+signal died(killer_team)
 
 const FIXED_DT := 1.0 / 60.0
 const STAND_HEIGHT := 1.8
@@ -59,6 +64,10 @@ var active := true              # M7: false = frozen (countdown / round-over / m
 var _loadout = WeaponLoadout.new()   # M8: per-actor fire/ammo/reload/switch state
 var _pending_shots: Array = []       # M8: shots fired this tick, drained by the combat director
 var _recoil = Recoil.new()           # M8.5: aim-punch + AOP recovery, through the look channel
+var _health = Health.new()           # M9: HP / death / respawn-timer / invulnerability
+var _spawn_pos := Vector3.ZERO       # M9: cached spawn pose so the actor can self-respawn mid-round
+var _spawn_yaw := 0.0
+var _body_mat: StandardMaterial3D    # M9: kept so the death/invuln visual can re-tint the capsule
 
 @onready var _col: CollisionShape3D = $Collision
 @onready var _mesh: MeshInstance3D = $Mesh
@@ -78,6 +87,10 @@ func _ready() -> void:
 	_apply_body_color()
 	_yaw = start_yaw
 	rotation.y = _yaw
+	# M9: remember the scene-placed spawn pose so a mid-round death can respawn here even before the
+	# first round_reset (MatchDirector records the same poses but only calls reset_to_spawn on resets).
+	_spawn_pos = global_position
+	_spawn_yaw = start_yaw
 	if is_local:
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 		_camera.current = true   # explicit: win the active-camera race vs. the bot's
@@ -88,9 +101,9 @@ func _ready() -> void:
 		print("[Bot] spawned at %v" % global_position)
 
 func _apply_body_color() -> void:
-	var m := StandardMaterial3D.new()
-	m.albedo_color = body_color
-	_mesh.material_override = m
+	_body_mat = StandardMaterial3D.new()
+	_body_mat.albedo_color = body_color
+	_mesh.material_override = _body_mat
 
 func _input(event: InputEvent) -> void:
 	if not is_local:
@@ -105,9 +118,20 @@ func _physics_process(_delta: float) -> void:
 	var cmd = _provider.poll(_tick)  # poll even when frozen (drains the mouse accumulator)
 
 	if not active:
-		# M7 freeze (countdown / round-over / match-over): hold still on the floor.
+		# M7 freeze (countdown / round-over / match-over): hold still on the floor. Death/invuln
+		# timers deliberately do NOT advance here — they only count during ACTIVE play.
 		velocity = Vector3.ZERO
 		move_and_slide()
+		_tick += 1
+		return
+
+	if _health.is_dead():
+		# M9: dead but in an ACTIVE round — hold still and count down to respawn (the rest of the
+		# living tick is skipped: no look / motion / firing / capture presence while dead).
+		velocity = Vector3.ZERO
+		move_and_slide()
+		if _health.tick() == "respawn":
+			_respawn()
 		_tick += 1
 		return
 
@@ -123,9 +147,16 @@ func _physics_process(_delta: float) -> void:
 	velocity = _motion.velocity
 	var from_pos := global_position
 	move_and_slide()
-	_apply_tile_restriction(from_pos)
+	_apply_tile_restriction(from_pos)  # M9: stranded standing on a flipped tile applies DoT here
+	if _health.is_dead():
+		# Stranded DoT just killed us this tick: stop here (don't fire/crouch); the dead branch
+		# takes over next tick. The death signal was already emitted in _apply_tile_restriction.
+		_tick += 1
+		return
 	_apply_crouch(_motion.crouching)
 	_fire(cmd, look_res["delta"])  # M8/M8.5: fire decision -> shot (pre-impulse) -> recoil via look channel
+	_health.tick()                 # M9: count down spawn invulnerability (alive path)
+	_refresh_combat_visual()       # M9: fade the capsule while invulnerable
 
 	if is_local:
 		var ads: bool = (cmd.buttons & InputCommand.BTN_ADS) != 0
@@ -143,6 +174,8 @@ func bind_world(grid, team: int) -> void:
 ## Reset the actor to a spawn pose for a new round (M7). Clears motion/camera/crouch so
 ## the round starts byte-identically to match start. The bound grid ref is unchanged.
 func reset_to_spawn(pos: Vector3, yaw: float) -> void:
+	_spawn_pos = pos       # M9: keep the spawn pose current for mid-round self-respawn
+	_spawn_yaw = yaw
 	global_position = pos
 	_yaw = yaw
 	_pitch = 0.0
@@ -155,9 +188,54 @@ func reset_to_spawn(pos: Vector3, yaw: float) -> void:
 	_loadout.reset()       # M8: fresh weapon / full mags each round
 	_pending_shots.clear()
 	_recoil.reset()        # M8.5: clear AOP / recovery state for the new round
+	_health.reset()        # M9: full HP, alive, NO invuln (a fresh round, not a respawn)
 	_apply_crouch(false)
+	_refresh_combat_visual()
 	if is_local:
 		_update_camera(false, 0.0)
+
+## M9: take incoming damage from the combat resolver (or any source). Routes through the pure Health
+## sim; on a lethal hit, react node-side once (hide the capsule + emit `died` for scoring). Not gated
+## by is_local — a bot dies the same way, keeping the netcode/replay seam clean.
+func take_damage(amount: float, attacker_team: int) -> void:
+	if _health.take_damage(amount):
+		_die(attacker_team)
+
+## M9: this actor just dropped to 0 HP. Health is already flagged dead; do the node-side reaction.
+func _die(killer_team: int) -> void:
+	velocity = Vector3.ZERO
+	_refresh_combat_visual()       # hide the capsule
+	died.emit(killer_team)
+
+## M9: come back at the cached spawn with full HP + firing-broken invulnerability (mid-round respawn).
+## reset_to_spawn already restored HP/loadout/recoil/pose; layer the spawn invuln on top.
+func _respawn() -> void:
+	reset_to_spawn(_spawn_pos, _spawn_yaw)
+	_health.respawn()
+	_refresh_combat_visual()
+
+## M9: the team this actor fights against (1<->2) — the "killer" credited for a stranded territory death.
+func _enemy_team() -> int:
+	return 2 if _team == 1 else 1
+
+## M9: placeholder combat visual — dead actors vanish; invulnerable actors fade translucent; otherwise
+## the solid team tint. Pure cosmetics (never printed/simulated), so it can't affect determinism.
+func _refresh_combat_visual() -> void:
+	if _body_mat == null:
+		return
+	if _health.is_dead():
+		_mesh.visible = false
+		return
+	_mesh.visible = true
+	var inv := _health.is_invulnerable()
+	_body_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA if inv else BaseMaterial3D.TRANSPARENCY_DISABLED
+	var c := body_color
+	c.a = 0.35 if inv else 1.0
+	_body_mat.albedo_color = c
+
+## M9: the live health state (for the HUD readout: HP / dead / invuln).
+func health():
+	return _health
 
 ## M8: advance the weapon state machine from this tick's command and, if it fired,
 ## queue a Shot for the combat director to resolve. The muzzle/aim origin is the eye
@@ -178,6 +256,7 @@ func _fire(cmd, player_delta: Vector2) -> void:
 	# M8.5 first-shot-true: build the shot from the CURRENT (pre-impulse) aim, then apply recoil.
 	if r["fired"]:
 		_queue_shot(int(r["weapon"]), (cmd.buttons & InputCommand.BTN_ADS) != 0)
+		_health.on_fire()  # M9: firing breaks spawn invulnerability
 	# M8.5 recoil through the look channel: an impulse on a firing tick, AOP tracking + recovery
 	# otherwise. The AOP is credited by ACTUAL post-clamp aim deltas (robust at the pitch limit).
 	# Not gated by is_local — a bot would recoil the same way (it just emits no fire/look yet).
@@ -233,8 +312,8 @@ func recoil():
 ## Clamp this tick's horizontal move to the team's walkable tiles (M5). No-op until a
 ## world is bound. The clamp math is pure (MovementRestriction); here we just apply the
 ## result and kill the into-wall velocity component for a clean hard stop. When
-## stranded (current cell illegal after a tile flip) nothing is clamped — free roam —
-## and that branch is where the M9 stranded damage-over-time will later hook in.
+## stranded (current cell illegal after a tile flip) nothing is clamped — free roam — and
+## that branch applies the M9 stranded damage-over-time (a "territory" death credits the enemy).
 func _apply_tile_restriction(from_pos: Vector3) -> void:
 	if _grid == null:
 		return
@@ -245,6 +324,12 @@ func _apply_tile_restriction(from_pos: Vector3) -> void:
 		velocity.x = 0.0
 	if r["hit_z"]:
 		velocity.z = 0.0
+	if r["stranded"]:
+		# M9: severe DoT while standing on a tile that flipped out from under us; dying this way is a
+		# territory kill for the enemy who captured the ground. (Invuln still protects via take_damage,
+		# though you can't strand at your own un-loseable spawn.)
+		if _health.take_damage(Health.STRANDED_DOT_PER_TICK):
+			_die(_enemy_team())
 
 func _apply_crouch(crouched: bool) -> void:
 	var h := CROUCH_HEIGHT if crouched else STAND_HEIGHT

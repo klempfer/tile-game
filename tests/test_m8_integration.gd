@@ -1,20 +1,26 @@
 extends Node
-## M8 integration smoke test: drives the CombatDirector node-layer pipeline with scripted
-## shots against a stub target and confirms hitscan + projectile hits resolve, log, and are
-## gated by phase. Complements the pure test_m8 (sim math) by exercising the WIRING:
-## shot dict -> CombatDirector -> Ballistics -> hit event. Deterministic (fixed seed, ADS =
-## no spread); prints [TEST] lines then idles (no quit()).
+## M8/M9 integration smoke test: drives the CombatDirector node-layer pipeline with scripted
+## shots against a stub target and confirms hitscan + projectile hits resolve, are gated by phase,
+## and (M9) APPLY damage to the victim's HP, with a lethal hit emitting died -> MatchState scoring and
+## a stranded death crediting the enemy. Complements the pure test_m8 / test_m9 (sim math) by
+## exercising the WIRING: shot dict -> CombatDirector -> Ballistics -> take_damage -> died -> add_point.
+## Deterministic (fixed seed, ADS = no spread); prints [TEST] lines then idles (no quit()).
 
 const WeaponDefs = preload("res://sim/weapon_defs.gd")
 const CombatDirector = preload("res://scripts/combat_director.gd")
+const Health = preload("res://sim/health.gd")
 
 var _results: Array = []
 
-## Minimal stand-in for an actor: just the methods CombatDirector calls on the actors.
+## Minimal stand-in for an actor: just the methods CombatDirector calls on the actors. M9 adds the
+## HP surface (take_damage + health) and a `died` signal so the combat->HP->death->score wiring is
+## exercised through the node layer the same way the real player.gd is.
 class StubActor extends RefCounted:
+	signal died(killer_team)
 	var _team: int
 	var _pos: Vector3
 	var _shots: Array
+	var hp = Health.new()
 	func _init(t: int, pos: Vector3, shots: Array) -> void:
 		_team = t
 		_pos = pos
@@ -27,6 +33,11 @@ class StubActor extends RefCounted:
 		var s := _shots
 		_shots = []
 		return s
+	func take_damage(amount: float, attacker_team: int) -> void:
+		if hp.take_damage(amount):
+			died.emit(attacker_team)
+	func health():
+		return hp
 
 func _ready() -> void:
 	Rng.set_seed(12345)
@@ -148,3 +159,58 @@ func _run() -> void:
 	_check("crouch_lowers_cam_origin",
 		is_equal_approx(stand_cam, 1.6) and is_equal_approx(crouch_cam, 1.0) and crouch_cam < stand_cam,
 		"stand=%.2f crouch=%.2f" % [stand_cam, crouch_cam])
+
+	# M9: a hit now SUBTRACTS HP from the victim (log-only in M8). One revolver body shot = 26 dmg.
+	combat.reset()
+	combat.set_active(true)
+	var dmg_target := StubActor.new(2, Vector3(0, 0, 0), [])
+	var body_shot := {
+		"weapon": WeaponDefs.REVOLVER, "muzzle": Vector3(0, 0.9, -5),
+		"cam_origin": Vector3(0, 0.9, -5), "cam_dir": Vector3(0, 0, 1),
+		"ads": true, "team": 1, "tick": 0,
+	}
+	var dmg_shooter := StubActor.new(1, Vector3(0, 0, -5), [body_shot])
+	combat._actors = [dmg_shooter, dmg_target]
+	combat._physics_process(0.0)
+	_check("combat_applies_damage",
+		is_equal_approx(dmg_target.health().hp, Health.MAX_HP - 26.0) and dmg_target.health().alive,
+		"hp=%.1f alive=%s" % [dmg_target.health().hp, dmg_target.health().alive])
+
+	# M9: a LETHAL hit emits died(killer_team), and a connected MatchState awards that team the point.
+	var MatchState := preload("res://sim/match_state.gd")
+	var ms = MatchState.new()
+	ms.phase = MatchState.PHASE_ACTIVE   # add_point only counts while ACTIVE
+	combat.reset()
+	combat.set_active(true)
+	var kill_target := StubActor.new(2, Vector3(0, 0, 0), [])
+	kill_target.died.connect(ms.add_point)
+	# Four revolver body shots in one tick (4 x 26 = 104 > 100) -> the 4th kills.
+	var volley: Array = []
+	for i in 4:
+		volley.append(body_shot.duplicate())
+	var kill_shooter := StubActor.new(1, Vector3(0, 0, -5), volley)
+	combat._actors = [kill_shooter, kill_target]
+	combat._physics_process(0.0)
+	_check("lethal_hit_scores_via_matchstate",
+		kill_target.health().is_dead() and ms.points[MatchState.TEAM1] == 1,
+		"dead=%s T1pts=%d" % [kill_target.health().is_dead(), ms.points[MatchState.TEAM1]])
+
+	# M9: a STRANDED death (tile flipped out from under you) credits the ENEMY team. Drive the real
+	# player's restriction path on a grid where team 1 owns nothing near the player's cell.
+	var TileGrid := preload("res://sim/tile_grid.gd")
+	var grid = TileGrid.new()                 # team 1 owns only spawn (5,1) + neighbours
+	var sp = PlayerScene.instantiate()
+	sp.is_local = false
+	add_child(sp)
+	sp.bind_world(grid, 1)
+	sp.global_position = Vector3.ZERO          # map centre — far from team-1 territory -> stranded
+	var stranded_killer := [-1]
+	sp.died.connect(func(team): stranded_killer[0] = team)
+	for i in 200:                              # ~180 ticks of DoT then death
+		sp._apply_tile_restriction(sp.global_position)
+		if sp.health().is_dead():
+			break
+	sp.queue_free()
+	_check("stranded_death_credits_enemy",
+		stranded_killer[0] == 2,
+		"killer_team=%d" % stranded_killer[0])
