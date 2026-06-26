@@ -41,7 +41,7 @@ When the user requests a change, explain the approach and **wait for "proceed"**
 - **Target Godot 4.7 APIs.** Keyboard+mouse default; **controller support required** (abstracted in
   the input layer from M1; verify KB+M every milestone, one dedicated controller pass later).
 
-## Godot/GDScript gotchas (all hit during M0–M8)
+## Godot/GDScript gotchas (all hit during M0–M8.5)
 
 - **Use `preload("res://...")` + `extends "res://..."`, NOT `class_name`.** A never-opened project
   has no global class cache, so `class_name` identifiers fail in headless CLI runs ("Identifier …
@@ -94,21 +94,22 @@ sim/               deterministic simulation (pure RefCounted; headlessly tested)
   movement_restriction.gd  M5 walkable-region clamp (owned∪neighbors; margin inset; stranded free-roam)
   match_state.gd     M7 deterministic match/round phase machine (countdown/active/over; points→round→match)
   team_colors.gd     customizable palette (static vars; blend derived)
-  weapon_defs.gd     M8 weapon stat table (revolver hitscan / bolt projectile) + combat consts (DATA)
-  weapon_loadout.gd  M8 per-actor fire-rate/ammo/reload/switch state machine (integer ticks; pure)
+  weapon_defs.gd     M8 weapon stat table (revolver hitscan / bolt projectile / M8.5 SMG hitscan) + combat + M8.5 recoil consts (DATA)
+  weapon_loadout.gd  M8 per-actor fire-rate/ammo/reload/switch state machine (integer ticks; pure; N weapons)
   ballistics.gd      M8 pure shot math: spread, ray-capsule hitscan, projectile step, falloff, headshot, aim_direction (two-trace)
+  recoil.gd          M8.5 pure aim-punch + Aim-Origin-Point recovery state machine (integer-tick; stores displacement D=aim−AOP)
 input/
-  input_command.gd       per-tick intent: move_dir, look (rad), buttons bitmask (JUMP/SPRINT/CROUCH/ADS + M8 FIRE/RELOAD/WEAPON1/WEAPON2)
+  input_command.gd       per-tick intent: move_dir, look (rad), buttons bitmask (JUMP/SPRINT/CROUCH/ADS + M8 FIRE/RELOAD/WEAPON1/WEAPON2 + M8.5 WEAPON3)
   input_provider.gd      base; ScriptedInputProvider (tests/replay); LocalInputProvider (KB+M+pad)
   bot_input_provider.gd  M6 trivial bot: constant move_dir (default forward), zero look/buttons (never fires yet)
   default_binds.gd       registers default InputMap actions at runtime (code defaults until Config menu)
 scripts/
-  player.gd          CharacterBody3D: provider→PlayerMotion→camera rig; M5 restriction; M6 is_local/bot; M7 active/reset; M8 WeaponLoadout + queues Shots
+  player.gd          CharacterBody3D: provider→PlayerMotion→camera rig; M5 restriction; M6 is_local/bot; M7 active/reset; M8 WeaponLoadout + queues Shots; M8.5 Recoil + $Muzzle marker + crouch-cam
   tile_grid_view.gd  tile visuals; drives capture from BOTH actors; binds restriction; M7 snapshot/reset_world; F1/F2/F3 debug
-  match_director.gd  M7 per-tick orchestrator: drives MatchState, freezes actors + gates capture/combat by phase, resets, debug HUD (+ M8 weapon/ammo line)
+  match_director.gd  M7 per-tick orchestrator: drives MatchState, freezes actors + gates capture/combat by phase, resets, debug HUD (+ M8 weapon/ammo line, M8.5 recoil-state line)
   combat_director.gd M8 resolver: collects both actors' Shots, converges aim, resolves hitscan + steps projectiles vs enemy capsule, logs damage, spawns tracers/markers; phase-gated
-scenes/             bootstrap, player, m1_movement..m7_match, m8_combat (per milestone; player.tscn shared)
-tests/              test_m0..m7, test_m8 (pure sim) + test_m8_integration (combat node wiring) (.gd + .tscn), idle-print pattern
+scenes/             bootstrap, player, m1_movement..m7_match, m8_combat (per milestone; player.tscn shared — incl. M8.5 $Muzzle Marker3D)
+tests/              test_m0..m7, test_m8 + test_m8_5 (pure sim) + test_m8_integration (combat/crouch node wiring) (.gd + .tscn), idle-print pattern
 docs/GDD.md         authoritative spec
 ```
 
@@ -123,13 +124,37 @@ flag only gates the local-only bits (mouse capture, camera). This is the netcode
 outlines are drawn from `cell_polygon` so hexes would render correctly.
 
 **Combat seam (M8):** firing is just `InputCommand` buttons. Each tick `player.gd._fire()` steps its
-pure `WeaponLoadout`; when it fires it queues a **Shot** dict `{weapon, muzzle (eye), cam_origin (rig
+pure `WeaponLoadout`; when it fires it queues a **Shot** dict `{weapon, muzzle, cam_origin (rig
 pivot), cam_dir (look_forward), ads, team, tick}` into `_pending_shots`. The scene-level
 `CombatDirector` (driven like `tile_grid_view`: phase-gated by `MatchDirector.set_active`, runs after
 the actors so it sees this tick's shots) drains both actors' `consume_shots()`, resolves them via the
 pure `Ballistics`, logs damage (no HP until M9), and owns projectile state + placeholder visuals.
 Firing is **not** gated by `is_local` (a bot would fire the same way — it just emits no fire button
 yet), so the netcode/replay seam stays clean. Spread draws from `Rng.stream("weapon_spread")`.
+
+**Recoil seam (M8.5):** recoil is layered onto the firing pipeline through `player.gd`'s `_yaw`/`_pitch`
+look channel. The pure `Recoil` (RefCounted, integer-tick) is an explicit **state machine** (IDLE →
+FIRING → RECOVERY_DELAY → RECOVERING) built around an **Aim-Origin-Point (AOP)** = the player's intended
+aim before recoil; firing kicks the aim away from it, then after a 6-tick (0.1 s) delay it pulls the aim
+back to the AOP at constant angular speed (snaps exactly, no overshoot). Internally it stores the
+**displacement** `_D = aim − AOP` (a small Vector2 yaw/pitch), which is robust to yaw wrap-around and the
+pitch clamp; the AOP is the implicit `aim − _D`. Every change to `_D` is credited by the **actual,
+post-clamp** aim delta (via the shared `Recoil.apply_look()` used by `player.gd` *and* the tests), so the
+AOP stays reachable at the pitch limit. Order in `_fire`: step the loadout → **queue the shot from the
+pre-impulse aim (first-shot-true)** → `Recoil.update()` applies an impulse (firing tick) or AOP-tracking +
+recovery (otherwise). The fixed horizontal pattern uses no RNG but `Rng.stream("weapon_recoil")` is
+plumbed in as the one-line seam for a future seeded jitter. Not gated by `is_local` (netcode-clean).
+
+**Muzzle origin (M8.5):** the bullet origin is a real `$Muzzle` `Marker3D` node on `player.tscn` (read
+via `_muzzle_origin()`), **not** a computed point — so once character/weapon models exist you parent it
+under the weapon and `global_position` tracks the real muzzle through any animation with no code change.
+For the placeholder capsule its height follows the crouch (`_apply_crouch` → `_eye_height()`); combat's
+`TRACE_BACK` keeps point-blank targets registering.
+
+**Crouch camera (M8.5):** crouch smoothly lowers the camera *position* only (`_crouch_blend` eases like
+ADS; height drops by `CROUCH_CAM_DROP`). The reticle then points lower in the world via parallax and the
+two-trace `cam_origin` uses the **same** lowered pivot so convergence holds. Crouch is a vertical
+translation and the recoil AOP is a pitch angle — **orthogonal**, so the recoil/AOP code is untouched.
 
 ---
 
@@ -155,7 +180,9 @@ yet), so the netcode/replay seam stays clean. Spread draws from `Rng.stream("wea
   (shift RIGHT, character clears crosshair), **no pull-in** (dist stays 3.0), zoom via FOV
   magnification `ADS_ZOOM=1.8` relative to `_base_fov` (FOV-slider-safe; `set_base_fov()` stub),
   look sens ×0.6. Camera can't go under the floor (`camera_position_grounded`, `CAM_MIN_Y=0.4`).
-  Sprint and ADS are mutually exclusive (most recent action wins).
+  Sprint and ADS are mutually exclusive (most recent action wins). **Crouch (M8.5)** smoothly lowers
+  the camera by `CROUCH_CAM_DROP=0.6` (eased via `CROUCH_BLEND_SPEED=8`, like ADS); body capsule still
+  resizes instantly.
 - **Tile visuals (M3/M4):** neutral grey / Team 1 blue / Team 2 red; fill = owner color (blended
   toward capturing color by progress); 0.1 m outlines; outline = frontier category (neutral / team1 /
   team2 / blend-purple). Colors centralized + customizable in `team_colors.gd`. F1 toggles (col,row)
@@ -210,6 +237,21 @@ yet), so the netcode/replay seam stays clean. Spread draws from `Rng.stream("wea
   player" guard (no shooting backward through yourself); a small `TRACE_BACK` handles a muzzle already
   overlapping the target. Controls added: **LMB** fire, **R** reload, **1/2** weapon select (controller
   binds deferred to the controller pass).
+- **Recoil (M8.5):** aim-punch + **auto-recovery to an Aim-Origin-Point** (see "Recoil seam" above).
+  Model chosen with the user: kick moves the real aim, recovers back to the AOP. **Fixed deterministic
+  horizontal pattern** (implemented so swapping to seeded jitter is one line), **no ADS reduction**,
+  **medium** strength. 6-tick (0.1 s) recovery delay; recovery is constant angular speed (deg/sec).
+  Per-weapon (deg): **Revolver** pitch 2.0 / yaw 0.5 / recovery 20; **Bolt** pitch 2.6 / yaw 0.4 /
+  recovery 20; **SMG** pitch 0.6 / yaw 0.5 / recovery 30 (strong, accumulates fast). AOP tracking of
+  player mouse is asymmetric: up/horizontal tracked fully, downward only shrinks the displacement
+  (so recovery never pulls aim up). All in `weapon_defs.gd` (`recoil_*`) — tune freely.
+- **SMG (M8.5 test weapon):** full-auto hitscan, key **3** (`weapon_3`). 12 dmg, 1.5× headshot, **900
+  rpm** (fire every 4 ticks), **mag 30**, reload 120 ticks, hip-cone 3.5°, falloff 100%≤8 m→35% at
+  ≥25 m. Added mainly to make recoil recovery easy to feel (strong recoil + fast fire). Adding it
+  proved `WeaponLoadout`/`Recoil` are weapon-count-agnostic.
+- **Crouch camera / muzzle (M8.5):** crouch lowers the camera (camera-drop only; reticle drops via
+  parallax, recoil AOP untouched — they're orthogonal). Bullet origin is a `$Muzzle` Marker3D that
+  follows the crouch now and will sit on the real weapon muzzle once models exist (see seams above).
 
 ---
 
@@ -232,20 +274,17 @@ yet), so the netcode/replay seam stays clean. Spread draws from `Rng.stream("wea
 - **M8** Weapons & firing: revolver (hitscan) + bolt (projectile), seeded hip-fire spread, ADS = no
   spread, falloff, headshots, magazine + reload, weapon switch (1/2), tracers/markers, damage logged
   (no HP yet). Pure sim (`weapon_defs`/`weapon_loadout`/`ballistics`) + `CombatDirector` node, phase-
-  gated. Two-trace aim convergence fixes third-person muzzle-vs-camera parallax. *Built; test_m8 16/16
-  + test_m8_integration 5/5 twice byte-identical; core playtest signed off — only the user's final
-  visual confirmation of the aim fix is outstanding.*
+  gated. Two-trace aim convergence fixes third-person muzzle-vs-camera parallax. *Signed off.*
+- **M8.5** Recoil pass: aim-punch + Aim-Origin-Point auto-recovery (pure `sim/recoil.gd` state machine,
+  integer-tick, through the look channel; fixed pattern, medium strength, no ADS reduction). Plus the
+  **SMG** full-auto test weapon (key 3), the **crouch-following $Muzzle marker** (M8 bug: muzzle didn't
+  follow crouch), and **crouch-lowers-camera** (camera-drop only; recoil AOP left orthogonal). *Built;
+  test_m8_5 18/18 + test_m8 18/18 + test_m8_integration 7/7 twice byte-identical; playtest signed off.*
 
-All milestones have green self-tests (test_m0..m8 + test_m8_integration) that pass twice byte-identically.
+All milestones have green self-tests (test_m0..m8, test_m8_5, test_m8_integration) passing twice byte-identically.
 
 **Feature layers (each opens with its own tuning questions):**
-- **M8.5 (NEXT — gate before M9)** Recoil pass. Deliberately sequenced after the firing/hit pipeline
-  is proven. Opens with its own tuning questions (per-weapon kick magnitude pitch/yaw, fixed vs seeded
-  pattern via `Rng.stream("weapon_recoil")`, recovery rate, ADS reduction). Likely shape: a pure
-  `sim/recoil.gd` (RefCounted, integer-tick) applied through `player.gd`'s existing `_yaw`/`_pitch`
-  look channel; per-weapon numbers added to `weapon_defs.gd`; determinism + recovery unit-tested.
-  **M9 must not begin until this is built, verified, and signed off.**
-- **M9** Health / death / respawn (5 s invuln, broken by firing) + kills→score (3/round, 2 rounds/match).
+- **M9 (NEXT)** Health / death / respawn (5 s invuln, broken by firing) + kills→score (3/round, 2 rounds/match).
   A kill calls `MatchState.add_point(team)` (the M7 scoring skeleton already handles round/match flow);
   replace the F4/F5 debug points. *Also wire the M5 stranded damage-over-time here* (severe DoT while
   on an illegal tile until you reach a legal one — the `_apply_tile_restriction` stranded branch in
