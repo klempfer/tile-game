@@ -1,8 +1,9 @@
 extends Node3D
-## M8 combat resolver. Each fixed tick (when active) it collects both actors' shots,
+## M8/M9 combat resolver. Each fixed tick (when active) it collects both actors' shots,
 ## resolves hitscan immediately and advances straight-line projectiles against the ENEMY
 ## actor's capsule via the pure Ballistics sim, computes falloff + headshot damage and
-## LOGS it (there is no HP until M9 — nothing is subtracted), and spawns placeholder
+## (M9) APPLIES it to the victim's HP via victim.take_damage() — the victim owns the death
+## reaction (visual + `died` signal that MatchDirector scores). Spawns placeholder
 ## tracer / in-flight projectile / hitmarker visuals. Holds projectile state across ticks;
 ## the MatchDirector gates it by phase (set_active) and clears it on round reset, exactly
 ## like the tile view gates capture. Determinism: spread draws from
@@ -94,7 +95,7 @@ func _resolve_hitscan(shot: Dictionary, w: Dictionary, dir: Vector3, enemy) -> v
 			end = res["point"]
 			var dist: float = muzzle.distance_to(res["point"])
 			var headshot: bool = Ballistics.is_headshot(res["hit_y"], hb["pos"].y, hb["height"])
-			_apply_hit(int(shot["team"]), w, dist, headshot, res["point"])
+			_apply_hit(int(shot["team"]), w, dist, headshot, res["point"], enemy)
 	_spawn_tracer(muzzle, end)
 
 func _launch_projectile(shot: Dictionary, w: Dictionary, dir: Vector3) -> void:
@@ -121,7 +122,7 @@ func _step_projectiles() -> void:
 			if Ballistics.projectile_hits(pr["pos"], float(w["proj_radius"]), hb["pos"], hb["radius"], hb["height"]):
 				var dist: float = (pr["origin"] as Vector3).distance_to(pr["pos"])
 				var headshot: bool = Ballistics.is_headshot((pr["pos"] as Vector3).y, hb["pos"].y, hb["height"])
-				_apply_hit(int(pr["team"]), w, dist, headshot, pr["pos"])
+				_apply_hit(int(pr["team"]), w, dist, headshot, pr["pos"], enemy)
 				done = true
 		if done or int(pr["age"]) >= int(w["proj_life_ticks"]):
 			pr["node"].queue_free()
@@ -129,11 +130,18 @@ func _step_projectiles() -> void:
 			survivors.append(pr)
 	_projectiles = survivors
 
-func _apply_hit(team: int, w: Dictionary, dist: float, headshot: bool, point: Vector3) -> void:
+## M9: apply the finalized damage to the victim's HP (was log-only in M8). The victim owns the kill
+## reaction (death visual + `died` signal -> scoring); here we just deal damage and report remaining HP.
+func _apply_hit(team: int, w: Dictionary, dist: float, headshot: bool, point: Vector3, victim) -> void:
 	var dmg := Ballistics.resolve_damage(w, dist, headshot)
+	if victim != null and victim.has_method("take_damage"):
+		victim.take_damage(dmg, team)
 	var zone := "HEAD" if headshot else "body"
-	last_event = "T%d %s %s %.0f dmg @ %.1fm" % [team, w["name"], zone, dmg, dist]
-	print("[COMBAT] %s (assumed %d HP)" % [last_event, WeaponDefs.ASSUMED_HP])
+	var hp_txt := ""
+	if victim != null and victim.has_method("health"):
+		hp_txt = " -> %d HP" % victim.health().hp_int()
+	last_event = "T%d %s %s %.0f dmg @ %.1fm%s" % [team, w["name"], zone, dmg, dist, hp_txt]
+	print("[COMBAT] %s" % last_event)
 	_spawn_marker(point)
 
 # --- placeholder visuals ---

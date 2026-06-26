@@ -103,12 +103,12 @@ input/
   bot_input_provider.gd  M6 trivial bot: constant move_dir (default forward), zero look/buttons (never fires yet)
   default_binds.gd       registers default InputMap actions at runtime (code defaults until Config menu)
 scripts/
-  player.gd          CharacterBody3D: provider→PlayerMotion→camera rig; M5 restriction; M6 is_local/bot; M7 active/reset; M8 WeaponLoadout + queues Shots
+  player.gd          CharacterBody3D: provider→PlayerMotion→camera rig; M5 restriction; M6 is_local/bot; M7 active/reset; M8 WeaponLoadout + queues Shots; M9 Health + take_damage/_die(died)/respawn + stranded DoT
   tile_grid_view.gd  tile visuals; drives capture from BOTH actors; binds restriction; M7 snapshot/reset_world; F1/F2/F3 debug
-  match_director.gd  M7 per-tick orchestrator: drives MatchState, freezes actors + gates capture/combat by phase, resets, debug HUD (+ M8 weapon/ammo line)
-  combat_director.gd M8 resolver: collects both actors' Shots, converges aim, resolves hitscan + steps projectiles vs enemy capsule, logs damage, spawns tracers/markers; phase-gated
+  match_director.gd  M7 per-tick orchestrator: drives MatchState, freezes actors + gates capture/combat by phase, resets, debug HUD (+ M8 weapon/ammo, M9 HP line); M9 actor `died`→add_point scoring
+  combat_director.gd M8 resolver: collects both actors' Shots, converges aim, resolves hitscan + steps projectiles vs enemy capsule; M9 applies damage to victim HP; spawns tracers/markers; phase-gated
 scenes/             bootstrap, player, m1_movement..m7_match, m8_combat (per milestone; player.tscn shared)
-tests/              test_m0..m7, test_m8 (pure sim) + test_m8_integration (combat node wiring) (.gd + .tscn), idle-print pattern
+tests/              test_m0..m7, test_m8, test_m8_5, test_m9 (pure sim) + test_m8_integration (combat+death node wiring) (.gd + .tscn), idle-print pattern
 docs/GDD.md         authoritative spec
 ```
 
@@ -127,9 +127,21 @@ pure `WeaponLoadout`; when it fires it queues a **Shot** dict `{weapon, muzzle (
 pivot), cam_dir (look_forward), ads, team, tick}` into `_pending_shots`. The scene-level
 `CombatDirector` (driven like `tile_grid_view`: phase-gated by `MatchDirector.set_active`, runs after
 the actors so it sees this tick's shots) drains both actors' `consume_shots()`, resolves them via the
-pure `Ballistics`, logs damage (no HP until M9), and owns projectile state + placeholder visuals.
-Firing is **not** gated by `is_local` (a bot would fire the same way — it just emits no fire button
-yet), so the netcode/replay seam stays clean. Spread draws from `Rng.stream("weapon_spread")`.
+pure `Ballistics`, **(M9) applies the damage to the victim's HP via `victim.take_damage(dmg, team)`**,
+and owns projectile state + placeholder visuals. Firing is **not** gated by `is_local` (a bot would
+fire the same way — it just emits no fire button yet), so the netcode/replay seam stays clean. Spread
+draws from `Rng.stream("weapon_spread")`.
+
+**Health / death seam (M9):** the actor owns its life state. Pure `sim/health.gd` (RefCounted,
+integer-tick) holds HP + invuln/respawn timers; `player.gd` feeds it damage (`take_damage`) and one
+`tick()` per ACTIVE tick (timers pause during match-phase freezes). On a lethal hit the actor hides
+its capsule and emits **`died(killer_team)`** — `MatchDirector` connects both actors' `died` to
+`MatchState.add_point()` (the M7 scoring skeleton), so weapon kills AND stranded "territory" deaths
+score through one path. Death/respawn are independent of the M7 `active` freeze: a dead actor in an
+ACTIVE round holds still and counts down `RESPAWN_TICKS`, then self-respawns at its cached spawn pose
+with `INVULN_TICKS` of firing-broken invulnerability. Stranded DoT hooks the `r["stranded"]` branch in
+`_apply_tile_restriction` (credits the enemy team on death). Combat stays ignorant of scoring; it only
+calls `take_damage`.
 
 ---
 
@@ -175,8 +187,9 @@ yet), so the netcode/replay seam stays clean. Spread draws from `Rng.stream("wea
   (`_clamp_to_map` vs `topology.world_aabb()`, inset by margin) is applied on *every* path including
   stranded, so a stranded actor roams freely but can never walk off the map. Future cross-tile cards
   make the target legal or grant a temporary travel-illegal override (same bypass path as stranded).
-  **Future M9:** severe damage-over-time while stranded. F2 debug = collapse Team-1 territory to
-  spawn (force a strand for playtesting).
+  **M9 (done):** severe damage-over-time while stranded (`100/180` HP/tick ≈ death in 3 s) hooks the
+  `r["stranded"]` branch; dying stranded is a territory kill for the enemy. F2 debug = collapse Team-1
+  territory to spawn (force a strand for playtesting).
 - **Second actor (M6):** the bot is the **same `player.gd` actor** with `is_local=false` →
   `BotInputProvider` (constant forward), no mouse/camera capture, camera not current, capsule tinted
   via `body_color`. The trivial "hold forward" + M5 restriction makes it creep its capture frontier
@@ -189,9 +202,10 @@ yet), so the netcode/replay seam stays clean. Spread draws from `Rng.stream("wea
   the same tick) ticks the state, sets each actor's `active` + `view.set_capture_active` by phase, and
   on the `"round_reset"` event restores **match-start ownership snapshot** (`TileGrid.snapshot/restore`,
   incl. debug head-starts) + `Capture.reset()` + `player.reset_to_spawn`. Points come from **debug
-  keys** standing in for M9 kills: **F4**/**F5** award Team 1/2 a point, **F6** restarts the match.
-  M9 kills will just call `MatchState.add_point(team)` — nothing else changes. Minimal on-screen Label
-  is a placeholder until the real HUD (M15).
+  keys**: pre-M9 these awarded Team 1/2 a point directly; **M9 (done)** replaced them — kills now call
+  `MatchState.add_point(team)` via each actor's `died` signal, and **F4/F5 now deal debug damage** to
+  force a kill. **F6** restarts the match. Minimal on-screen Label is a placeholder until the real HUD
+  (M15).
 - **Weapons & firing (M8):** two weapons, switched with **1 / 2** (`weapon_1`/`weapon_2` actions).
   **Revolver** (hitscan, single-shot): 26 dmg, 1.5× headshot, fire every 30 ticks, mag 6, reload 96
   ticks, hip-cone 3°, falloff 100%≤10 m→40% at ≥30 m. **Bolt** (straight-line projectile, no gravity,
@@ -210,6 +224,16 @@ yet), so the netcode/replay seam stays clean. Spread draws from `Rng.stream("wea
   player" guard (no shooting backward through yourself); a small `TRACE_BACK` handles a muzzle already
   overlapping the target. Controls added: **LMB** fire, **R** reload, **1/2** weapon select (controller
   binds deferred to the controller pass).
+- **Health / death / respawn (M9):** **base HP 100** (`Health.MAX_HP`; M8 damage was already calibrated
+  to it). A hit subtracts HP; 0 HP = death → killer's team scores via `MatchState.add_point`. **Respawn
+  delay 180 ticks (3 s)** at your own un-loseable spawn; **respawn invulnerability 300 ticks (5 s),
+  broken the moment you fire** (`on_fire`). **Stranded DoT** = `100/180` HP/tick (a full bar in 180
+  ticks ≈ 3 s) while standing on a tile that flipped under you; dying that way is a **territory kill**
+  crediting the enemy. No passive regen (energy/regen is M10; HP bars over heads are M11). Death/respawn
+  timers advance only during the ACTIVE phase (they pause through countdown/round-over freezes, which
+  fully reset HP). Debug keys repurposed: **F4** damages the bot, **F5** damages the player (force a
+  kill without aiming); **F6** still restarts. Placeholder visuals: dead = capsule hidden, invuln =
+  translucent tint.
 
 ---
 
@@ -230,26 +254,22 @@ yet), so the netcode/replay seam stays clean. Spread draws from `Rng.stream("wea
   match phases, freezes, and clean deterministic resets (tile snapshot + actor respawn). Debug F4/F5
   points (placeholder for M9 kills), F6 restart. Foundations complete.
 - **M8** Weapons & firing: revolver (hitscan) + bolt (projectile), seeded hip-fire spread, ADS = no
-  spread, falloff, headshots, magazine + reload, weapon switch (1/2), tracers/markers, damage logged
-  (no HP yet). Pure sim (`weapon_defs`/`weapon_loadout`/`ballistics`) + `CombatDirector` node, phase-
-  gated. Two-trace aim convergence fixes third-person muzzle-vs-camera parallax. *Built; test_m8 16/16
-  + test_m8_integration 5/5 twice byte-identical; core playtest signed off — only the user's final
-  visual confirmation of the aim fix is outstanding.*
-
-All milestones have green self-tests (test_m0..m8 + test_m8_integration) that pass twice byte-identically.
+  spread, falloff, headshots, magazine + reload, weapon switch (1/2), tracers/markers. Pure sim
+  (`weapon_defs`/`weapon_loadout`/`ballistics`) + `CombatDirector` node, phase-gated. Two-trace aim
+  convergence fixes third-person muzzle-vs-camera parallax. Signed off.
+- **M8.5** Recoil pass: pure `sim/recoil.gd` aim-punch + AOP auto-recovery through the look channel,
+  per-weapon numbers in `weapon_defs.gd`, SMG full-auto test weapon (key 3), `$Muzzle` marker, crouch
+  camera-drop. Signed off.
 
 **Feature layers (each opens with its own tuning questions):**
-- **M8.5 (NEXT — gate before M9)** Recoil pass. Deliberately sequenced after the firing/hit pipeline
-  is proven. Opens with its own tuning questions (per-weapon kick magnitude pitch/yaw, fixed vs seeded
-  pattern via `Rng.stream("weapon_recoil")`, recovery rate, ADS reduction). Likely shape: a pure
-  `sim/recoil.gd` (RefCounted, integer-tick) applied through `player.gd`'s existing `_yaw`/`_pitch`
-  look channel; per-weapon numbers added to `weapon_defs.gd`; determinism + recovery unit-tested.
-  **M9 must not begin until this is built, verified, and signed off.**
-- **M9** Health / death / respawn (5 s invuln, broken by firing) + kills→score (3/round, 2 rounds/match).
-  A kill calls `MatchState.add_point(team)` (the M7 scoring skeleton already handles round/match flow);
-  replace the F4/F5 debug points. *Also wire the M5 stranded damage-over-time here* (severe DoT while
-  on an illegal tile until you reach a legal one — the `_apply_tile_restriction` stranded branch in
-  `player.gd` is the hook).
+- **M9 (BUILT — awaiting playtest sign-off)** Health / death / respawn + kills→score. Pure
+  `sim/health.gd` (HP/invuln/respawn, integer-tick) applied through `player.gd`; combat applies damage
+  to victim HP; a lethal hit emits `died(killer_team)` → `MatchDirector` → `MatchState.add_point`
+  (replacing the F4/F5 debug points, now debug-damage). Base HP 100, respawn 3 s, spawn invuln 5 s
+  broken by firing; stranded DoT (`100/180` HP/tick) wired into the `_apply_tile_restriction` stranded
+  branch with the death credited to the enemy. *Verified: test_m9 13/13 + test_m8_integration 10/10
+  twice byte-identical; m8_combat boots clean and applies damage live (HP → 0 → kill). Manual playtest
+  pending.*
 - **M10** Energy (200; sprint/dodge/shield/build; 0→2 s stun) + dodge roll + directional shield.
 - **M11** Detection (20 m, 50 m/1 s on fire, team-shared, 3 s linger, outlines + HP bars, indicator).
 - **M12** Structures (build radial menu; wall/turret/lookout; owned-tiles-only; persist; SpringArm

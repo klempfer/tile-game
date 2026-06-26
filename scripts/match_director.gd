@@ -5,9 +5,10 @@ extends Node
 ## on the one-shot "round_reset" event. Placed FIRST in the scene tree so it gates the
 ## same tick the view/actors read.
 ##
-## Debug input stands in for M9 kills: F4/F5 award a point to Team 1/2 (3 points wins a
-## round, first to 2 rounds wins the match), F6 restarts the match. A minimal on-screen
-## Label is a placeholder readout until the real HUD (M15).
+## M9: kills (weapon or stranded) drive scoring via each actor's `died(killer_team)` signal ->
+## add_point (3 points wins a round, first to 2 rounds wins the match). Debug keys now deal damage
+## to force deaths: F4 damages the bot, F5 damages the player; F6 restarts. A minimal on-screen Label
+## is a placeholder readout until the real HUD (M15).
 
 const MatchState = preload("res://sim/match_state.gd")
 const DefaultBinds = preload("res://input/default_binds.gd")
@@ -43,7 +44,19 @@ func _ready() -> void:
 	_p_yaw = _player.start_yaw
 	_b_pos = _bot.global_position
 	_b_yaw = _bot.start_yaw
+	# M9: a kill (weapon or stranded) emits `died(killer_team)`; route both actors' deaths to scoring.
+	# Same path the F4/F5 debug keys used in M7 — add_point already drives round/match progression.
+	if _player.has_signal("died"):
+		_player.connect("died", _on_actor_died)
+	if _bot.has_signal("died"):
+		_bot.connect("died", _on_actor_died)
 	_apply_phase()  # freeze for the opening countdown
+	_update_hud()
+
+## M9: an actor died — award the round point to the killer's team. add_point() ignores non-ACTIVE
+## phases and handles the round/match transitions; the next-tick _apply_phase() applies the freeze.
+func _on_actor_died(killer_team: int) -> void:
+	_state.add_point(killer_team)
 	_update_hud()
 
 func _physics_process(_dt: float) -> void:
@@ -70,11 +83,15 @@ func _reset_world() -> void:
 		_combat.reset()
 
 func _unhandled_input(event: InputEvent) -> void:
+	# M9: real kills now score, so the F4/F5 debug keys deal a chunk of damage instead (forces deaths
+	# for playtesting without precise aim). Only during ACTIVE, crediting the killing team on death.
 	if event.is_action_pressed("debug_point_team1"):
-		_state.add_point(MatchState.TEAM1)
+		if _state.is_active() and _bot != null and _bot.has_method("take_damage"):
+			_bot.take_damage(35.0, MatchState.TEAM1)   # damage the bot -> a T1 kill
 		_update_hud()
 	elif event.is_action_pressed("debug_point_team2"):
-		_state.add_point(MatchState.TEAM2)
+		if _state.is_active() and _player != null and _player.has_method("take_damage"):
+			_player.take_damage(35.0, MatchState.TEAM2) # damage the player -> a T2 kill
 		_update_hud()
 	elif event.is_action_pressed("debug_restart_match"):
 		_state.restart()
@@ -85,12 +102,31 @@ func _unhandled_input(event: InputEvent) -> void:
 func _update_hud() -> void:
 	if _hud == null:
 		return
-	_hud.text = "%s   round %d\nrounds  T1 %d : %d T2\npoints  T1 %d : %d T2%s%s\n[F4] T1 point  [F5] T2 point  [F6] restart" % [
+	_hud.text = "%s   round %d\nrounds  T1 %d : %d T2\npoints  T1 %d : %d T2%s%s%s\n[F4] dmg bot  [F5] dmg self  [F6] restart" % [
 		_phase_label(), _state.round_index,
 		_state.round_wins[MatchState.TEAM1], _state.round_wins[MatchState.TEAM2],
 		_state.points[MatchState.TEAM1], _state.points[MatchState.TEAM2],
-		_winner_suffix(), _weapon_line(),
+		_winner_suffix(), _hp_line(), _weapon_line(),
 	]
+
+## M9 HUD line: both actors' HP + a state tag (DEAD countdown / INVULN). Empty in scenes without HP.
+func _hp_line() -> String:
+	if _player == null or not _player.has_method("health"):
+		return ""
+	var p = _player.health()
+	var t1 := "%d%s" % [p.hp_int(), _hp_tag(p)]
+	var t2 := "--"
+	if _bot != null and _bot.has_method("health"):
+		var b = _bot.health()
+		t2 = "%d%s" % [b.hp_int(), _hp_tag(b)]
+	return "\nhp  T1 %s : %s T2" % [t1, t2]
+
+func _hp_tag(h) -> String:
+	if h.is_dead():
+		return " DEAD %.1fs" % (h.respawn_ticks() / 60.0)
+	if h.is_invulnerable():
+		return " INVULN"
+	return ""
 
 ## M8 HUD line: local player's selected weapon / ammo / reload + the latest hit. Empty
 ## in scenes without weapons (m7), so this director stays usable there.
