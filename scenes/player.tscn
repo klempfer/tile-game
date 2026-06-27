@@ -31,12 +31,14 @@ script = ExtResource("1")
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.9, 0)
 shape = SubResource("shape")
 
-[node name="Mesh" type="MeshInstance3D" parent="."]
+[node name="Model" type="Node3D" parent="."]
+
+[node name="Mesh" type="MeshInstance3D" parent="Model"]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.9, 0)
 mesh = SubResource("mesh")
 material_override = SubResource("mat")
 
-[node name="Nose" type="MeshInstance3D" parent="."]
+[node name="Nose" type="MeshInstance3D" parent="Model"]
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.0, -0.45)
 mesh = SubResource("nosemesh")
 material_override = SubResource("nosemat")

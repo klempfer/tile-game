@@ -16,6 +16,7 @@ const Health = preload("res://sim/health.gd")
 const Energy = preload("res://sim/energy.gd")
 const Dodge = preload("res://sim/dodge.gd")
 const Shield = preload("res://sim/shield.gd")
+const Detection = preload("res://sim/detection.gd")
 
 ## M9: emitted once when this actor's HP hits 0. `killer_team` is the shooter's team for a weapon
 ## kill, or the enemy team for a stranded "territory" death. MatchDirector connects this to scoring.
@@ -74,9 +75,19 @@ var _body_mat: StandardMaterial3D    # M9: kept so the death/invuln visual can r
 var _energy = Energy.new()           # M10: energy pool / stun / recovery
 var _dodge = Dodge.new()             # M10: dodge-roll kinematic burst
 var _shield_up := false              # M10: directional shield raised (toggled with F)
+var _detection = Detection.new()     # M11: per-actor detectability ("visible to the enemy") state
+var _rendered := true                # M11: drawn on the local screen? (enemies stay hidden until detected)
+var _outline: MeshInstance3D = null  # M11: inverted-hull silhouette (built lazily for non-local actors)
+var _hpbar: Node3D = null            # M11: overhead HP-bar root (built lazily for non-local actors)
+var _hpbar_fg: MeshInstance3D = null # M11: the HP bar's foreground quad (scaled by HP fraction)
 
 @onready var _col: CollisionShape3D = $Collision
-@onready var _mesh: MeshInstance3D = $Mesh
+# M11: the whole visual body lives under $Model — toggling ONE node's visibility hides every child
+# (capsule, nose, and any imported asset meshes later), so detection-hiding never needs to know the
+# model's internals. This is the seam a future free-asset model swaps into. `_mesh` is still tracked for
+# the body-color tint + crouch resize; visibility is gated on `_model`, never per-mesh.
+@onready var _model: Node3D = $Model
+@onready var _mesh: MeshInstance3D = $Model/Mesh
 @onready var _camera: Camera3D = $Camera3D
 # M8.5: bullet-origin marker. A real node (not a computed point) so that once character + weapon
 # models exist it can be parented under the weapon — its global_position then tracks the actual muzzle
@@ -315,6 +326,8 @@ func reset_to_spawn(pos: Vector3, yaw: float) -> void:
 	_energy.reset()        # M10: full pool, NORMAL
 	_dodge.reset()         # M10: clear any in-progress roll
 	_set_shield(false)     # M10: shield down
+	_detection.reset()     # M11: go dark; the director re-reveals the enemy when detected
+	_rendered = is_local   # M11: enemies start hidden until detected; the local player always renders
 	_apply_crouch(false)
 	_refresh_combat_visual()
 	if is_local:
@@ -360,12 +373,20 @@ func _enemy_team() -> int:
 func _refresh_combat_visual() -> void:
 	if _shield_visual != null:
 		_shield_visual.visible = _shield_up
-	if _body_mat == null:
+	# M11: drawn only when alive AND rendered (enemies are hidden until detected). One toggle on $Model
+	# hides the entire body (capsule + nose + future asset meshes) — composes the M9 dead state with the
+	# M11 render gate. The silhouette + HP bar (non-local actors only) follow the same gate separately
+	# (they're procedural detection overlays, not part of the swappable model).
+	var shown: bool = (not _health.is_dead()) and _rendered
+	_model.visible = shown
+	if _outline != null:
+		_outline.visible = shown
+	if _hpbar != null:
+		_hpbar.visible = shown
+		if shown:
+			_update_hpbar()
+	if _body_mat == null or not shown:
 		return
-	if _health.is_dead():
-		_mesh.visible = false
-		return
-	_mesh.visible = true
 	if _energy.is_stunned():
 		_body_mat.transparency = BaseMaterial3D.TRANSPARENCY_DISABLED
 		_body_mat.albedo_color = Color(1.0, 0.85, 0.2)  # M10 stun indicator (placeholder)
@@ -375,6 +396,66 @@ func _refresh_combat_visual() -> void:
 	var c := body_color
 	c.a = 0.35 if inv else 1.0
 	_body_mat.albedo_color = c
+
+## M11: build the inverted-hull silhouette + overhead HP bar on first use (non-local actors only — you
+## don't outline yourself). Code-built placeholders (no .tscn churn), like the combat tracers. The outline
+## is an unshaded, front-culled capsule slightly larger than the body -> a shadow-independent rim (red
+## hostile / blue friendly per GDD §11). Crouch height-sync is a deferred cosmetic nicety (sized to stand).
+func _ensure_detection_nodes(is_enemy: bool) -> void:
+	if is_local:
+		return
+	var shape := _col.shape as CapsuleShape3D
+	var body_h: float = shape.height if shape else STAND_HEIGHT
+	if _outline == null:
+		_outline = MeshInstance3D.new()
+		var cm := CapsuleMesh.new()
+		cm.radius = (shape.radius if shape else 0.4) + 0.06
+		cm.height = body_h + 0.12
+		_outline.mesh = cm
+		_outline.position.y = body_h * 0.5
+		var om := StandardMaterial3D.new()
+		om.albedo_color = Color(1.0, 0.2, 0.2) if is_enemy else Color(0.3, 0.6, 1.0)
+		om.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		om.cull_mode = BaseMaterial3D.CULL_FRONT  # render back faces only -> a silhouette rim
+		_outline.material_override = om
+		_outline.visible = false
+		add_child(_outline)
+	if _hpbar == null:
+		_hpbar = Node3D.new()
+		_hpbar.position = Vector3(0.0, body_h + 0.35, 0.0)
+		add_child(_hpbar)
+		_hpbar.add_child(_make_bar_quad(Color(0.0, 0.0, 0.0, 0.6), 0))   # background (render_priority 0)
+		_hpbar_fg = _make_bar_quad(Color(0.2, 0.9, 0.2, 1.0), 1)          # foreground (priority 1 -> on top)
+		_hpbar.add_child(_hpbar_fg)
+		_hpbar.visible = false
+
+## M11: one billboarded HP-bar quad (~1.0 x 0.12 m; the foreground is scaled by HP in _update_hpbar).
+## `priority` = render_priority: a higher value draws later, so the foreground (1) is ALWAYS on top of
+## the background (0) regardless of view angle — fixing the color flip a world-space z-nudge caused (its
+## "in front" direction flipped as the camera orbited). `no_depth_test` is left false so the bar respects
+## the depth buffer and is occluded by closer player models. `cull_disabled` keeps both faces identical.
+func _make_bar_quad(col: Color, priority: int) -> MeshInstance3D:
+	var mi := MeshInstance3D.new()
+	var qm := QuadMesh.new()
+	qm.size = Vector2(1.0, 0.12)
+	mi.mesh = qm
+	var m := StandardMaterial3D.new()
+	m.albedo_color = col
+	m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	m.cull_mode = BaseMaterial3D.CULL_DISABLED
+	m.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
+	m.billboard_keep_scale = true
+	m.render_priority = priority
+	mi.material_override = m
+	return mi
+
+## M11: shrink the HP-bar foreground to the current HP fraction (center-shrink placeholder; the real
+## corner-anchored bar arrives with the full HUD in M15).
+func _update_hpbar() -> void:
+	if _hpbar_fg == null:
+		return
+	_hpbar_fg.scale.x = clampf(_health.hp / Health.MAX_HP, 0.0, 1.0)
 
 ## M9: the live health state (for the HUD readout: HP / dead / invuln).
 func health():
@@ -387,6 +468,26 @@ func energy():
 ## M10: whether the directional shield is currently raised (HUD readout).
 func shield_up() -> bool:
 	return _shield_up
+
+## M11: the live detection state — HUD reads `.detected` for the "you are detected" indicator; the
+## DetectionDirector reads it to decide whether to render this actor on the local screen.
+func detection():
+	return _detection
+
+## M11: the DetectionDirector calls this for non-local actors each tick: enemies are rendered only when
+## detected, friendlies always. Stores the render flag, lazily builds the silhouette + HP bar (colored by
+## `is_enemy` — red hostile / blue friendly, GDD §11), and refreshes the visual. The local player never
+## gets this (it always renders itself, no overhead outline).
+func set_detection_visual(rendered: bool, is_enemy: bool) -> void:
+	_rendered = rendered
+	_ensure_detection_nodes(is_enemy)
+	_refresh_combat_visual()
+
+## M11: center-of-body point for center-to-center detection distance (capsule midpoint, crouch-aware).
+func body_center() -> Vector3:
+	var shape := _col.shape as CapsuleShape3D
+	var h: float = shape.height if shape else STAND_HEIGHT
+	return global_position + Vector3(0.0, h * 0.5, 0.0)
 
 ## M8: advance the weapon state machine from this tick's command and, if it fired,
 ## queue a Shot for the combat director to resolve. The muzzle/aim origin is the eye
@@ -408,6 +509,7 @@ func _fire(cmd, player_delta: Vector2) -> void:
 	if r["fired"]:
 		_queue_shot(int(r["weapon"]), (cmd.buttons & InputCommand.BTN_ADS) != 0)
 		_health.on_fire()  # M9: firing breaks spawn invulnerability
+		_detection.on_fire()  # M11: firing blooms your detectability (WoWS — firing reveals you)
 	# M8.5 recoil through the look channel: an impulse on a firing tick, AOP tracking + recovery
 	# otherwise. The AOP is credited by ACTUAL post-clamp aim deltas (robust at the pitch limit).
 	# Not gated by is_local — a bot would recoil the same way (it just emits no fire/look yet).

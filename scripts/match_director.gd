@@ -19,6 +19,7 @@ const WeaponDefs = preload("res://sim/weapon_defs.gd")
 @export var bot_path: NodePath
 @export var hud_label_path: NodePath
 @export var combat_path: NodePath          # M8 combat resolver (optional; null in m7 scene)
+@export var detection_path: NodePath       # M11 detection resolver (optional; null in m7 scene)
 
 var _state
 var _view: Node
@@ -26,6 +27,7 @@ var _player: Node3D
 var _bot: Node3D
 var _hud: Label
 var _combat: Node                          # M8: CombatDirector, gated like the view
+var _detection: Node                       # M11: DetectionDirector, gated like the view
 var _p_pos: Vector3
 var _p_yaw: float
 var _b_pos: Vector3
@@ -39,6 +41,7 @@ func _ready() -> void:
 	_bot = get_node(bot_path) as Node3D
 	_hud = get_node_or_null(hud_label_path) as Label
 	_combat = get_node_or_null(combat_path)
+	_detection = get_node_or_null(detection_path)
 	# Record spawn poses (the scene already places actors at match start).
 	_p_pos = _player.global_position
 	_p_yaw = _player.start_yaw
@@ -74,6 +77,8 @@ func _apply_phase() -> void:
 	_view.set_capture_active(active)
 	if _combat != null:
 		_combat.set_active(active)
+	if _detection != null:
+		_detection.set_active(active)
 
 func _reset_world() -> void:
 	_view.reset_world()
@@ -81,6 +86,8 @@ func _reset_world() -> void:
 	_bot.reset_to_spawn(_b_pos, _b_yaw)
 	if _combat != null:
 		_combat.reset()
+	if _detection != null:
+		_detection.reset()
 
 func _unhandled_input(event: InputEvent) -> void:
 	# M9: real kills now score, so the F4/F5 debug keys deal a chunk of damage instead (forces deaths
@@ -102,11 +109,11 @@ func _unhandled_input(event: InputEvent) -> void:
 func _update_hud() -> void:
 	if _hud == null:
 		return
-	_hud.text = "%s   round %d\nrounds  T1 %d : %d T2\npoints  T1 %d : %d T2%s%s%s%s\n[F4] dmg bot  [F5] dmg self  [F6] restart" % [
+	_hud.text = "%s   round %d\nrounds  T1 %d : %d T2\npoints  T1 %d : %d T2%s%s%s%s%s\n[F4] dmg bot  [F5] dmg self  [F6] restart" % [
 		_phase_label(), _state.round_index,
 		_state.round_wins[MatchState.TEAM1], _state.round_wins[MatchState.TEAM2],
 		_state.points[MatchState.TEAM1], _state.points[MatchState.TEAM2],
-		_winner_suffix(), _hp_line(), _energy_line(), _weapon_line(),
+		_winner_suffix(), _hp_line(), _energy_line(), _weapon_line(), _detection_line(),
 	]
 
 ## M9 HUD line: both actors' HP + a state tag (DEAD countdown / INVULN). Empty in scenes without HP.
@@ -148,6 +155,17 @@ func _energy_tag(e, actor) -> String:
 	if actor.has_method("shield_up") and actor.shield_up():
 		return " SHIELD"
 	return ""
+
+## M11 HUD line: whether YOU are currently visible to the enemy (the detection indicator) + whether the
+## bot is currently rendered. Empty in scenes without detection (m7), so this director stays usable there.
+func _detection_line() -> String:
+	if _player == null or not _player.has_method("detection"):
+		return ""
+	var you: String = "DETECTED" if _player.detection().detected else "hidden"
+	var bot_s := "--"
+	if _bot != null and _bot.has_method("detection"):
+		bot_s = "visible" if _bot.detection().detected else "hidden"
+	return "\ndetect  YOU %s | bot %s" % [you, bot_s]
 
 ## M8 HUD line: local player's selected weapon / ammo / reload + the latest hit. Empty
 ## in scenes without weapons (m7), so this director stays usable there.

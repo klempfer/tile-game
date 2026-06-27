@@ -11,6 +11,8 @@ const CombatDirector = preload("res://scripts/combat_director.gd")
 const Health = preload("res://sim/health.gd")
 const Energy = preload("res://sim/energy.gd")
 const Shield = preload("res://sim/shield.gd")
+const DetectionDirector = preload("res://scripts/detection_director.gd")
+const Detection = preload("res://sim/detection.gd")
 
 var _results: Array = []
 
@@ -255,3 +257,74 @@ func _run() -> void:
 		is_equal_approx(fl_target.health().hp, Health.MAX_HP - 26.0)
 		and is_equal_approx(fl_target.energy.energy, Energy.MAX),
 		"hp=%.1f energy=%.1f" % [fl_target.health().hp, fl_target.energy.energy])
+
+	# M11: the DetectionDirector node layer. Real player instances (is_local=false so no mouse/camera
+	# grab; both are treated as non-local here, which still exercises the enemy-render gate on the bot).
+	# Ticked by hand like the CombatDirector. Determinism: detection uses no RNG; timers are integer ticks.
+	var dp = PlayerScene.instantiate()
+	dp.is_local = false
+	add_child(dp)
+	dp._team = 1
+	var db = PlayerScene.instantiate()
+	db.is_local = false
+	add_child(db)
+	db._team = 2
+	var det = DetectionDirector.new()
+	det._actors = [dp, db]
+	det.local_team = 1
+	det.set_active(true)
+
+	# Enemy hidden beyond base range (30 m > 17.5 m), shown when within it (10 m).
+	dp.global_position = Vector3.ZERO
+	db.global_position = Vector3(0, 0, 30)
+	det._physics_process(0.0)
+	var far_hidden: bool = not db.detection().detected and not db._model.visible
+	db.global_position = Vector3(0, 0, 10)
+	det._physics_process(0.0)
+	var near_shown: bool = db.detection().detected and db._model.visible
+	_check("detection_enemy_hidden_then_shown", far_hidden and near_shown,
+		"far_hidden=%s near_shown=%s" % [far_hidden, near_shown])
+
+	# Leaving range: the bot lingers (still detected) for LINGER_TICKS, then goes dark + hidden.
+	db.global_position = Vector3(0, 0, 30)
+	det._physics_process(0.0)
+	var lingering: bool = db.detection().detected and db._model.visible
+	for i in Detection.LINGER_TICKS:
+		det._physics_process(0.0)
+	var gone_dark: bool = not db.detection().detected and not db._model.visible
+	_check("detection_linger_then_dark", lingering and gone_dark,
+		"linger=%s dark=%s" % [lingering, gone_dark])
+
+	# WoWS fire bloom: the player 30 m from the bot is hidden until it fires (range 17.5 -> 50), then
+	# its own detected flag (the HUD "you are detected" indicator) flips on.
+	dp.global_position = Vector3.ZERO
+	db.global_position = Vector3(0, 0, 30)
+	det._physics_process(0.0)
+	var hidden_no_fire: bool = not dp.detection().detected
+	dp.detection().on_fire()
+	det._physics_process(0.0)
+	var revealed_by_fire: bool = dp.detection().detected
+	_check("detection_fire_bloom_reveals", hidden_no_fire and revealed_by_fire,
+		"no_fire=%s fired=%s" % [hidden_no_fire, revealed_by_fire])
+
+	# Phase gate: while inactive the director doesn't step detection (a point-blank enemy stays dark).
+	det.set_active(false)
+	var gp = PlayerScene.instantiate()
+	gp.is_local = false
+	add_child(gp)
+	gp._team = 1
+	var gb = PlayerScene.instantiate()
+	gb.is_local = false
+	add_child(gb)
+	gb._team = 2
+	gp.global_position = Vector3.ZERO
+	gb.global_position = Vector3(0, 0, 5)
+	det._actors = [gp, gb]
+	det._physics_process(0.0)
+	_check("detection_phase_gated", not gb.detection().detected,
+		"detected=%s" % gb.detection().detected)
+
+	dp.queue_free()
+	db.queue_free()
+	gp.queue_free()
+	gb.queue_free()

@@ -1,9 +1,10 @@
-[gd_scene load_steps=7 format=3]
+[gd_scene load_steps=8 format=3]
 
 [ext_resource type="PackedScene" path="res://scenes/player.tscn" id="player"]
 [ext_resource type="Script" path="res://scripts/tile_grid_view.gd" id="view"]
 [ext_resource type="Script" path="res://scripts/match_director.gd" id="director"]
 [ext_resource type="Script" path="res://scripts/combat_director.gd" id="combat"]
+[ext_resource type="Script" path="res://scripts/detection_director.gd" id="detection"]
 
 [sub_resource type="Environment" id="env"]
 background_mode = 1
@@ -24,6 +25,7 @@ player_path = NodePath("../Player")
 bot_path = NodePath("../Bot")
 hud_label_path = NodePath("../HUD/StatusLabel")
 combat_path = NodePath("../Combat")
+detection_path = NodePath("../Detection")
 
 [node name="WorldEnvironment" type="WorldEnvironment" parent="."]
 environment = SubResource("env")
@@ -63,6 +65,11 @@ body_color = Color(0.9, 0.2, 0.2, 1)
 
 [node name="Combat" type="Node3D" parent="."]
 script = ExtResource("combat")
+player_path = NodePath("../Player")
+bot_path = NodePath("../Bot")
+
+[node name="Detection" type="Node3D" parent="."]
+script = ExtResource("detection")
 player_path = NodePath("../Player")
 bot_path = NodePath("../Bot")
 
