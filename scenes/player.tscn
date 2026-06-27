@@ -1,4 +1,4 @@
-[gd_scene load_steps=7 format=3]
+[gd_scene load_steps=8 format=3]
 
 [ext_resource type="Script" path="res://scripts/player.gd" id="1"]
 
@@ -20,6 +20,9 @@ size = Vector3(0.25, 0.25, 0.25)
 
 [sub_resource type="StandardMaterial3D" id="nosemat"]
 albedo_color = Color(1, 0.9, 0.1, 1)
+
+[sub_resource type="QuadMesh" id="shieldmesh"]
+size = Vector2(1.6, 1.8)
 
 [node name="Player" type="CharacterBody3D"]
 script = ExtResource("1")
@@ -44,3 +47,8 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.6, 0)
 [node name="Camera3D" type="Camera3D" parent="."]
 top_level = true
 current = true
+
+[node name="ShieldVisual" type="MeshInstance3D" parent="."]
+top_level = true
+mesh = SubResource("shieldmesh")
+visible = false

@@ -13,6 +13,9 @@ const WeaponLoadout = preload("res://sim/weapon_loadout.gd")
 const WeaponDefs = preload("res://sim/weapon_defs.gd")
 const Recoil = preload("res://sim/recoil.gd")
 const Health = preload("res://sim/health.gd")
+const Energy = preload("res://sim/energy.gd")
+const Dodge = preload("res://sim/dodge.gd")
+const Shield = preload("res://sim/shield.gd")
 
 ## M9: emitted once when this actor's HP hits 0. `killer_team` is the shooter's team for a weapon
 ## kill, or the enemy team for a stranded "territory" death. MatchDirector connects this to scoring.
@@ -68,6 +71,9 @@ var _health = Health.new()           # M9: HP / death / respawn-timer / invulner
 var _spawn_pos := Vector3.ZERO       # M9: cached spawn pose so the actor can self-respawn mid-round
 var _spawn_yaw := 0.0
 var _body_mat: StandardMaterial3D    # M9: kept so the death/invuln visual can re-tint the capsule
+var _energy = Energy.new()           # M10: energy pool / stun / recovery
+var _dodge = Dodge.new()             # M10: dodge-roll kinematic burst
+var _shield_up := false              # M10: directional shield raised (toggled with F)
 
 @onready var _col: CollisionShape3D = $Collision
 @onready var _mesh: MeshInstance3D = $Mesh
@@ -78,6 +84,10 @@ var _body_mat: StandardMaterial3D    # M9: kept so the death/invuln visual can r
 # _apply_crouch). get_node_or_null keeps older scenes safe; _muzzle_origin() falls back to a computed
 # eye point if absent.
 @onready var _muzzle: Marker3D = get_node_or_null("Muzzle")
+# M10: translucent flat barrier shown in front of the actor while the shield is up. A world mesh (not
+# is_local-gated) so the opponent sees it too; parented under the body so it inherits the body yaw
+# (= the shield's facing). get_node_or_null keeps older scenes safe (it simply stays absent there).
+@onready var _shield_visual: MeshInstance3D = get_node_or_null("ShieldVisual")
 
 func _ready() -> void:
 	if is_local:
@@ -85,6 +95,7 @@ func _ready() -> void:
 	else:
 		_provider = BotInputProvider.new()
 	_apply_body_color()
+	_setup_shield_visual()
 	_yaw = start_yaw
 	rotation.y = _yaw
 	# M9: remember the scene-placed spawn pose so a mid-round death can respawn here even before the
@@ -104,6 +115,35 @@ func _apply_body_color() -> void:
 	_body_mat = StandardMaterial3D.new()
 	_body_mat.albedo_color = body_color
 	_mesh.material_override = _body_mat
+
+## M10: tint the shield barrier plane to the team color (translucent, double-sided, unshaded) and hide
+## it until raised. M10.1: `top_level` so it is NOT glued to the body transform — `_update_shield_visual`
+## drives its world pose from the full aim (yaw + pitch) each tick. A world mesh, so the opponent sees it.
+func _setup_shield_visual() -> void:
+	if _shield_visual == null:
+		return
+	_shield_visual.top_level = true
+	var sm := StandardMaterial3D.new()
+	var sc := body_color
+	sc.a = 0.3
+	sm.albedo_color = sc
+	sm.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	sm.cull_mode = BaseMaterial3D.CULL_DISABLED
+	sm.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	_shield_visual.material_override = sm
+	_shield_visual.visible = false
+
+## M10.1: place the shield quad in front of the eye along the FULL aim (yaw + pitch), perpendicular to
+## it, SHIELD_DIST out (pushed out so it clears the capsule when looking up/down). Centralised constants
+## (Shield.SHIELD_DIST) keep the visible plane identical to the block test. Only runs while raised.
+func _update_shield_visual() -> void:
+	if _shield_visual == null or not _shield_up:
+		return
+	var eye := global_position + Vector3(0.0, _eye_height(), 0.0)
+	var aim := look_forward(_yaw, _pitch)
+	var center := eye + aim * Shield.SHIELD_DIST
+	_shield_visual.global_position = center
+	_shield_visual.look_at(center + aim, Vector3.UP)  # quad perpendicular to the aim (pitch-safe ≤80°)
 
 func _input(event: InputEvent) -> void:
 	if not is_local:
@@ -138,12 +178,41 @@ func _physics_process(_delta: float) -> void:
 	# Look (radians this tick) -> yaw/pitch. Body faces yaw (strafe-style). M8.5: the wrap/clamp lives
 	# in Recoil.apply_look so recoil tracks the ACTUAL (post-clamp) reticle movement, not raw input
 	# (matters at the pitch limit / aiming at the ground); it returns the actual delta for AOP tracking.
+	# Look is ALWAYS allowed — even mid-dodge or while shielding.
 	var look_res := Recoil.apply_look(_yaw, _pitch, cmd.look, PITCH_LIMIT)
 	_yaw = look_res["yaw"]
 	_pitch = look_res["pitch"]
 	rotation.y = _yaw
 
-	_motion.tick(cmd, FIXED_DT, is_on_floor(), _yaw)
+	var can_act: bool = _energy.can_use_energy()  # M10: energy actions only in NORMAL
+
+	# M10 dodge: trigger first; once rolling, the roll is uncancellable (only look + ADS honored).
+	if not _dodge.active() and (cmd.buttons & InputCommand.BTN_DODGE) != 0 and can_act:
+		if _energy.try_spend(Energy.DODGE_COST):
+			_dodge.try_start(_dodge_direction(cmd.move_dir))
+			_set_shield(false)  # a dodge cancels the shield
+	if _dodge.active():
+		_tick_dodge(cmd, look_res["delta"])
+		return
+
+	# M10 shield (toggle): raise/lower on the press edge; passive drain; drop if it bottoms out.
+	_update_shield(cmd, can_act)
+
+	# M10: feed motion/fire a gated command — strip sprint when unpayable / shielding, and strip
+	# fire+reload while shielding or stunned. (Walk/jump/crouch always pass; weapon-switch too.)
+	var stripped: int = cmd.buttons
+	var sprint_ok: bool = (cmd.buttons & InputCommand.BTN_SPRINT) != 0 and can_act and not _shield_up
+	if sprint_ok and not _energy.drain(Energy.SPRINT_DRAIN_PER_TICK, Energy.SPRINT_REGEN_DELAY):
+		sprint_ok = false  # bottomed out this tick -> stun; sprint ends
+	if not sprint_ok:
+		stripped &= ~InputCommand.BTN_SPRINT
+	if _shield_up or _energy.is_stunned():
+		stripped &= ~(InputCommand.BTN_FIRE | InputCommand.BTN_RELOAD)
+	var mcmd = cmd
+	if stripped != cmd.buttons:
+		mcmd = InputCommand.new(cmd.tick, cmd.move_dir, cmd.look, stripped)
+
+	_motion.tick(mcmd, FIXED_DT, is_on_floor(), _yaw)
 	velocity = _motion.velocity
 	var from_pos := global_position
 	move_and_slide()
@@ -154,10 +223,64 @@ func _physics_process(_delta: float) -> void:
 		_tick += 1
 		return
 	_apply_crouch(_motion.crouching)
-	_fire(cmd, look_res["delta"])  # M8/M8.5: fire decision -> shot (pre-impulse) -> recoil via look channel
-	_health.tick()                 # M9: count down spawn invulnerability (alive path)
-	_refresh_combat_visual()       # M9: fade the capsule while invulnerable
+	_fire(mcmd, look_res["delta"])  # M8/M8.5: fire decision -> shot (pre-impulse) -> recoil via look channel
+	_health.tick()                  # M9: count down spawn invulnerability (alive path)
+	_energy.tick()                  # M10: regen / stun / recovery countdown
+	_refresh_combat_visual()        # M9/M10: capsule fade (invuln) / stun tint + shield plane
+	_update_shield_visual()         # M10.1: drive the shield plane from the post-recoil aim (yaw+pitch)
 
+	if is_local:
+		var ads: bool = (cmd.buttons & InputCommand.BTN_ADS) != 0
+		_update_camera(ads, FIXED_DT)
+	_tick += 1
+
+## M10: world-space dodge direction from camera-relative move input; straight backward (toward the
+## camera) when there is no directional input, so a no-input dodge is a back-hop.
+func _dodge_direction(move_dir: Vector2) -> Vector3:
+	var dir := Vector3(move_dir.x, 0.0, -move_dir.y)
+	if dir.length() < 0.01:
+		dir = Vector3(0.0, 0.0, 1.0)  # local backward
+	return dir.rotated(Vector3.UP, _yaw)
+
+## M10: set the shield raised/lowered and keep the placeholder barrier mesh in sync.
+func _set_shield(up: bool) -> void:
+	_shield_up = up
+	if _shield_visual != null:
+		_shield_visual.visible = up
+
+## M10: F is a toggle — press raises (pays the deploy cost, NORMAL only) or lowers (free). While up the
+## shield drains passively; if that bottoms out the pool it drops (and the drain triggered the stun).
+func _update_shield(cmd, can_act: bool) -> void:
+	if (cmd.buttons & InputCommand.BTN_SHIELD) != 0:
+		if _shield_up:
+			_set_shield(false)
+		elif can_act and _energy.try_spend(Energy.SHIELD_DEPLOY_COST):
+			_set_shield(true)
+	if _shield_up and not _energy.drain(Energy.SHIELD_DRAIN_PER_TICK):
+		_set_shield(false)
+
+## M10: one tick of an in-progress dodge roll. Uncancellable — only look (already applied) + ADS are
+## honored. Motion runs on a neutral command (gravity/floor) with horizontal velocity overridden by the
+## dodge burst; the loadout/recoil tick with no fire/reload/switch (recovery only).
+func _tick_dodge(cmd, look_delta: Vector2) -> void:
+	var ncmd = InputCommand.new(_tick, Vector2.ZERO, Vector2.ZERO, 0)
+	_motion.tick(ncmd, FIXED_DT, is_on_floor(), _yaw)
+	velocity = _motion.velocity
+	var dv := _dodge.velocity()
+	velocity.x = dv.x
+	velocity.z = dv.z
+	var from_pos := global_position
+	move_and_slide()
+	_apply_tile_restriction(from_pos)
+	if _health.is_dead():
+		_tick += 1
+		return
+	_apply_crouch(false)
+	_fire(ncmd, look_delta)
+	_dodge.tick()
+	_health.tick()
+	_energy.tick()
+	_refresh_combat_visual()
 	if is_local:
 		var ads: bool = (cmd.buttons & InputCommand.BTN_ADS) != 0
 		_update_camera(ads, FIXED_DT)
@@ -189,16 +312,29 @@ func reset_to_spawn(pos: Vector3, yaw: float) -> void:
 	_pending_shots.clear()
 	_recoil.reset()        # M8.5: clear AOP / recovery state for the new round
 	_health.reset()        # M9: full HP, alive, NO invuln (a fresh round, not a respawn)
+	_energy.reset()        # M10: full pool, NORMAL
+	_dodge.reset()         # M10: clear any in-progress roll
+	_set_shield(false)     # M10: shield down
 	_apply_crouch(false)
 	_refresh_combat_visual()
 	if is_local:
 		_update_camera(false, 0.0)
 
-## M9: take incoming damage from the combat resolver (or any source). Routes through the pure Health
-## sim; on a lethal hit, react node-side once (hide the capsule + emit `died` for scoring). Not gated
-## by is_local — a bot dies the same way, keeping the netcode/replay seam clean.
-func take_damage(amount: float, attacker_team: int) -> void:
-	if _health.take_damage(amount):
+## M9/M10: take incoming damage from the combat resolver (or any source). `shot_dir` is the shot's
+## travel direction and `hit_point` where it struck the body (M10.1) — a raised shield blocks only if
+## the shot's path actually crosses the visible shield quad (`Shield.blocks`, ray-vs-quad), absorbing the
+## hit into energy (2× the damage) and leaking only the unaffordable remainder to HP. `shot_dir = 0`
+## (stranded DoT / debug) is unblockable. On a lethal result, react node-side once (hide the capsule +
+## emit `died`). Not gated by is_local — a bot dies the same way, keeping the netcode/replay seam clean.
+func take_damage(amount: float, attacker_team: int, shot_dir: Vector3 = Vector3.ZERO, hit_point: Vector3 = Vector3.ZERO) -> void:
+	var dmg := amount
+	if _shield_up and shot_dir != Vector3.ZERO:
+		var eye := global_position + Vector3(0.0, _eye_height(), 0.0)
+		if Shield.blocks(eye, look_forward(_yaw, _pitch), hit_point, shot_dir):
+			dmg = _energy.absorb(amount)  # leaked (unblockable) remainder continues to HP
+	if dmg <= 0.0:
+		return
+	if _health.take_damage(dmg):
 		_die(attacker_team)
 
 ## M9: this actor just dropped to 0 HP. Health is already flagged dead; do the node-side reaction.
@@ -218,15 +354,22 @@ func _respawn() -> void:
 func _enemy_team() -> int:
 	return 2 if _team == 1 else 1
 
-## M9: placeholder combat visual — dead actors vanish; invulnerable actors fade translucent; otherwise
-## the solid team tint. Pure cosmetics (never printed/simulated), so it can't affect determinism.
+## M9/M10: placeholder combat visual — dead actors vanish; stunned actors flash yellow; invulnerable
+## actors fade translucent; otherwise the solid team tint. Also syncs the shield barrier mesh to the
+## raised state. Pure cosmetics (never printed/simulated), so it can't affect determinism.
 func _refresh_combat_visual() -> void:
+	if _shield_visual != null:
+		_shield_visual.visible = _shield_up
 	if _body_mat == null:
 		return
 	if _health.is_dead():
 		_mesh.visible = false
 		return
 	_mesh.visible = true
+	if _energy.is_stunned():
+		_body_mat.transparency = BaseMaterial3D.TRANSPARENCY_DISABLED
+		_body_mat.albedo_color = Color(1.0, 0.85, 0.2)  # M10 stun indicator (placeholder)
+		return
 	var inv := _health.is_invulnerable()
 	_body_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA if inv else BaseMaterial3D.TRANSPARENCY_DISABLED
 	var c := body_color
@@ -236,6 +379,14 @@ func _refresh_combat_visual() -> void:
 ## M9: the live health state (for the HUD readout: HP / dead / invuln).
 func health():
 	return _health
+
+## M10: the live energy state (for the HUD readout: energy / stun / recover / shield).
+func energy():
+	return _energy
+
+## M10: whether the directional shield is currently raised (HUD readout).
+func shield_up() -> bool:
+	return _shield_up
 
 ## M8: advance the weapon state machine from this tick's command and, if it fired,
 ## queue a Shot for the combat director to resolve. The muzzle/aim origin is the eye

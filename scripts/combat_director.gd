@@ -95,7 +95,7 @@ func _resolve_hitscan(shot: Dictionary, w: Dictionary, dir: Vector3, enemy) -> v
 			end = res["point"]
 			var dist: float = muzzle.distance_to(res["point"])
 			var headshot: bool = Ballistics.is_headshot(res["hit_y"], hb["pos"].y, hb["height"])
-			_apply_hit(int(shot["team"]), w, dist, headshot, res["point"], enemy)
+			_apply_hit(int(shot["team"]), w, dist, headshot, res["point"], enemy, dir)
 	_spawn_tracer(muzzle, end)
 
 func _launch_projectile(shot: Dictionary, w: Dictionary, dir: Vector3) -> void:
@@ -122,7 +122,7 @@ func _step_projectiles() -> void:
 			if Ballistics.projectile_hits(pr["pos"], float(w["proj_radius"]), hb["pos"], hb["radius"], hb["height"]):
 				var dist: float = (pr["origin"] as Vector3).distance_to(pr["pos"])
 				var headshot: bool = Ballistics.is_headshot((pr["pos"] as Vector3).y, hb["pos"].y, hb["height"])
-				_apply_hit(int(pr["team"]), w, dist, headshot, pr["pos"], enemy)
+				_apply_hit(int(pr["team"]), w, dist, headshot, pr["pos"], enemy, (pr["vel"] as Vector3).normalized())
 				done = true
 		if done or int(pr["age"]) >= int(w["proj_life_ticks"]):
 			pr["node"].queue_free()
@@ -132,10 +132,10 @@ func _step_projectiles() -> void:
 
 ## M9: apply the finalized damage to the victim's HP (was log-only in M8). The victim owns the kill
 ## reaction (death visual + `died` signal -> scoring); here we just deal damage and report remaining HP.
-func _apply_hit(team: int, w: Dictionary, dist: float, headshot: bool, point: Vector3, victim) -> void:
+func _apply_hit(team: int, w: Dictionary, dist: float, headshot: bool, point: Vector3, victim, shot_dir: Vector3) -> void:
 	var dmg := Ballistics.resolve_damage(w, dist, headshot)
 	if victim != null and victim.has_method("take_damage"):
-		victim.take_damage(dmg, team)
+		victim.take_damage(dmg, team, shot_dir, point)  # M10.1: shot_dir + hit point -> ray-vs-quad shield block
 	var zone := "HEAD" if headshot else "body"
 	var hp_txt := ""
 	if victim != null and victim.has_method("health"):

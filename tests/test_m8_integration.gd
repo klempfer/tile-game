@@ -9,18 +9,23 @@ extends Node
 const WeaponDefs = preload("res://sim/weapon_defs.gd")
 const CombatDirector = preload("res://scripts/combat_director.gd")
 const Health = preload("res://sim/health.gd")
+const Energy = preload("res://sim/energy.gd")
+const Shield = preload("res://sim/shield.gd")
 
 var _results: Array = []
 
 ## Minimal stand-in for an actor: just the methods CombatDirector calls on the actors. M9 adds the
-## HP surface (take_damage + health) and a `died` signal so the combat->HP->death->score wiring is
-## exercised through the node layer the same way the real player.gd is.
+## HP surface (take_damage + health) + `died`; M10 adds the energy/shield surface so the directional
+## shield block is exercised through the combat pipeline exactly like the real player.gd.
 class StubActor extends RefCounted:
 	signal died(killer_team)
 	var _team: int
 	var _pos: Vector3
 	var _shots: Array
 	var hp = Health.new()
+	var energy = Energy.new()
+	var shield_up := false
+	var facing := Vector3(0, 0, -1)   # M10 shield facing; set per test
 	func _init(t: int, pos: Vector3, shots: Array) -> void:
 		_team = t
 		_pos = pos
@@ -33,8 +38,15 @@ class StubActor extends RefCounted:
 		var s := _shots
 		_shots = []
 		return s
-	func take_damage(amount: float, attacker_team: int) -> void:
-		if hp.take_damage(amount):
+	func take_damage(amount: float, attacker_team: int, shot_dir: Vector3 = Vector3.ZERO, hit_point: Vector3 = Vector3.ZERO) -> void:
+		var dmg := amount
+		if shield_up and shot_dir != Vector3.ZERO:
+			var eye := _pos + Vector3(0.0, WeaponDefs.EYE_HEIGHT, 0.0)
+			if Shield.blocks(eye, facing, hit_point, shot_dir):   # M10.1 ray-vs-quad against the visible plane
+				dmg = energy.absorb(amount)   # shield absorbs into energy, leaks only the remainder
+		if dmg <= 0.0:
+			return
+		if hp.take_damage(dmg):
 			died.emit(attacker_team)
 	func health():
 		return hp
@@ -214,3 +226,32 @@ func _run() -> void:
 	_check("stranded_death_credits_enemy",
 		stranded_killer[0] == 2,
 		"killer_team=%d" % stranded_killer[0])
+
+	# M10: a raised shield facing the shooter BLOCKS the frontal hit through the combat pipeline — HP is
+	# untouched and the energy pool pays 2x the damage (26 dmg -> 52 energy: 200 -> 148).
+	combat.reset()
+	combat.set_active(true)
+	var sh_target := StubActor.new(2, Vector3(0, 0, 0), [])
+	sh_target.shield_up = true
+	sh_target.facing = Vector3(0, 0, -1)        # facing toward the shooter (at -Z) -> blocks the +Z shot
+	var sh_shooter := StubActor.new(1, Vector3(0, 0, -5), [body_shot.duplicate()])
+	combat._actors = [sh_shooter, sh_target]
+	combat._physics_process(0.0)
+	_check("shield_blocks_frontal_hit",
+		is_equal_approx(sh_target.health().hp, Health.MAX_HP)
+		and is_equal_approx(sh_target.energy.energy, Energy.MAX - 52.0),
+		"hp=%.1f energy=%.1f" % [sh_target.health().hp, sh_target.energy.energy])
+
+	# M10: a shield facing the WRONG way (flank) does not block — HP takes the full 26.
+	combat.reset()
+	combat.set_active(true)
+	var fl_target := StubActor.new(2, Vector3(0, 0, 0), [])
+	fl_target.shield_up = true
+	fl_target.facing = Vector3(1, 0, 0)         # facing +X while the shot comes from -Z -> no block
+	var fl_shooter := StubActor.new(1, Vector3(0, 0, -5), [body_shot.duplicate()])
+	combat._actors = [fl_shooter, fl_target]
+	combat._physics_process(0.0)
+	_check("shield_misses_flank_hit",
+		is_equal_approx(fl_target.health().hp, Health.MAX_HP - 26.0)
+		and is_equal_approx(fl_target.energy.energy, Energy.MAX),
+		"hp=%.1f energy=%.1f" % [fl_target.health().hp, fl_target.energy.energy])

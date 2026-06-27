@@ -57,6 +57,12 @@ func poll(_tick: int):
 		buttons |= InputCommand.BTN_WEAPON2
 	if Input.is_action_just_pressed("weapon_3"):
 		buttons |= InputCommand.BTN_WEAPON3
+	# M10: dodge (edge) + shield (toggle press edge — player.gd owns the up/down state since energy
+	# depletion and a dodge can force the shield down independent of input).
+	if Input.is_action_just_pressed("dodge"):
+		buttons |= InputCommand.BTN_DODGE
+	if Input.is_action_just_pressed("shield"):
+		buttons |= InputCommand.BTN_SHIELD
 	return InputCommand.new(_tick, move, look, buttons)
 
 ## Resolve sprint vs ADS mutual exclusion. Most recently initiated action wins: a
