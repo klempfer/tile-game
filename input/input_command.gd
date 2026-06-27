@@ -18,6 +18,8 @@ const BTN_RELOAD := 1 << 5     # M8
 const BTN_WEAPON1 := 1 << 6    # M8: select weapon 1 this tick
 const BTN_WEAPON2 := 1 << 7    # M8: select weapon 2 this tick
 const BTN_WEAPON3 := 1 << 8    # M8.5: select weapon 3 this tick (SMG)
+const BTN_DODGE := 1 << 9      # M10: dodge-roll this tick (edge)
+const BTN_SHIELD := 1 << 10    # M10: shield toggle press this tick (edge; player.gd owns up/down)
 
 var tick: int = 0
 var move_dir: Vector2 = Vector2.ZERO  # local-space intended move (x = strafe, y = forward)

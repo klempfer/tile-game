@@ -97,13 +97,17 @@ sim/               deterministic simulation (pure RefCounted; headlessly tested)
   weapon_defs.gd     M8 weapon stat table (revolver hitscan / bolt projectile) + combat consts (DATA)
   weapon_loadout.gd  M8 per-actor fire-rate/ammo/reload/switch state machine (integer ticks; pure)
   ballistics.gd      M8 pure shot math: spread, ray-capsule hitscan, projectile step, falloff, headshot, aim_direction (two-trace)
+  health.gd          M9 pure HP/death/respawn state machine (integer-tick invuln + respawn timers; stranded DoT)
+  energy.gd          M10 pure energy pool: sprint/dodge/shield costs + 2-phase stun→recovery (integer-tick)
+  dodge.gd           M10 pure dodge-roll kinematic burst (locked dir × speed for N ticks; no i-frames)
+  shield.gd          M10 pure ±45° directional-block arc test (is a shot inside the shield's front cone)
 input/
-  input_command.gd       per-tick intent: move_dir, look (rad), buttons bitmask (JUMP/SPRINT/CROUCH/ADS + M8 FIRE/RELOAD/WEAPON1/WEAPON2)
+  input_command.gd       per-tick intent: move_dir, look (rad), buttons bitmask (JUMP/SPRINT/CROUCH/ADS + M8 FIRE/RELOAD/WEAPON1-3 + M10 DODGE/SHIELD)
   input_provider.gd      base; ScriptedInputProvider (tests/replay); LocalInputProvider (KB+M+pad)
   bot_input_provider.gd  M6 trivial bot: constant move_dir (default forward), zero look/buttons (never fires yet)
   default_binds.gd       registers default InputMap actions at runtime (code defaults until Config menu)
 scripts/
-  player.gd          CharacterBody3D: provider→PlayerMotion→camera rig; M5 restriction; M6 is_local/bot; M7 active/reset; M8 WeaponLoadout + queues Shots; M9 Health + take_damage/_die(died)/respawn + stranded DoT
+  player.gd          CharacterBody3D: provider→PlayerMotion→camera rig; M5 restriction; M6 is_local/bot; M7 active/reset; M8 WeaponLoadout + queues Shots; M9 Health + take_damage/_die(died)/respawn + stranded DoT; M10 Energy/Dodge/Shield gating + take_damage(from_dir)
   tile_grid_view.gd  tile visuals; drives capture from BOTH actors; binds restriction; M7 snapshot/reset_world; F1/F2/F3 debug
   match_director.gd  M7 per-tick orchestrator: drives MatchState, freezes actors + gates capture/combat by phase, resets, debug HUD (+ M8 weapon/ammo, M9 HP line); M9 actor `died`→add_point scoring
   combat_director.gd M8 resolver: collects both actors' Shots, converges aim, resolves hitscan + steps projectiles vs enemy capsule; M9 applies damage to victim HP; spawns tracers/markers; phase-gated
@@ -142,6 +146,20 @@ ACTIVE round holds still and counts down `RESPAWN_TICKS`, then self-respawns at 
 with `INVULN_TICKS` of firing-broken invulnerability. Stranded DoT hooks the `r["stranded"]` branch in
 `_apply_tile_restriction` (credits the enemy team on death). Combat stays ignorant of scoring; it only
 calls `take_damage`.
+
+**Energy / dodge / shield seam (M10):** one 200 pool (`sim/energy.gd`, pure integer-tick) backs sprint,
+dodge, and shield (build is M12). `player.gd` gates the per-tick command **before** motion: a dodge
+(`sim/dodge.gd`, uncancellable burst — only look + ADS mid-roll) is triggered first and overrides
+horizontal velocity; the shield (toggle `F`, owns `_shield_up`) drains while up and strips
+sprint/fire/reload (but allows walk/crouch/jump); sprint drains 15/s and is stripped when unpayable.
+Draining to 0 → **STUNNED 2 s** (no fire/reload/energy) → **RECOVERING** (refills 50/s, energy actions
+locked but fire/reload allowed) → NORMAL at full. The **directional block** extends the M9 damage seam:
+`combat_director._apply_hit` passes the shot direction **and hit point** to `take_damage(amount, team,
+shot_dir, hit_point)`, and a raised shield blocks **only if the shot's path crosses the visible quad**
+(`sim/shield.gd` ray-vs-quad — the quad tracks the full aim yaw+pitch, `top_level` `$ShieldVisual` driven
+in code, pushed `SHIELD_DIST` out), absorbing the hit into energy (2× the damage) and leaking only the
+unaffordable remainder to HP. Stranded DoT / debug damage pass `shot_dir=0` (unblockable). The bot emits
+no dodge/shield buttons yet (its pool stays full) — the seam stays clean.
 
 ---
 
@@ -234,6 +252,23 @@ calls `take_damage`.
   fully reset HP). Debug keys repurposed: **F4** damages the bot, **F5** damages the player (force a
   kill without aiming); **F6** still restarts. Placeholder visuals: dead = capsule hidden, invuln =
   translucent tint.
+- **Energy / dodge / shield (M10, refined in M10.1):** one **200** pool (`Energy.MAX`). **Regen 40/s**,
+  with a **per-action regen delay** (M10.1): sprint **0** (regen resumes the tick you stop), dodge/shield
+  **1 s**; delays compose as a **single-int max** (`_regen_pause = maxi(remaining, action_delay)`) =
+  parallel timers blocked until the latest expiry, so a shorter delay never overwrites a longer one and
+  spamming isn't cumulative (a `_spent_this_tick` flag also stops same-tick regen so sprint can't
+  out-regen its drain). **Sprint** drains **15/s**. **Dodge** (key **X**) costs **40**, **no i-frames**,
+  a locked burst (`DODGE_SPEED 17.5 m/s × 18 ticks`, M10.1: +25%), **uncancellable** (only look + ADS
+  mid-roll), usable in air, **cancels a raised shield**. **Shield** (key **F, toggle**) costs **20 to
+  deploy**, **20/s** passive, **+2× the damage it blocks**; **not planted** (walk/crouch/jump OK, no
+  sprint/fire/reload). **M10.1:** the shield is a **flat quad tracking the full aim (yaw + pitch)**,
+  `top_level` + code-driven, pushed `SHIELD_DIST=1.5 m` out (clears the capsule up/down; ±80° pitch cap);
+  it blocks **only shots whose path actually crosses the visible quad** (`Shield.blocks` = ray-vs-quad,
+  `HALF_W/H` match the mesh) — NOT an infinite cone. **Out of energy → STUN 2 s** (visual flash; no
+  fire/reload/energy, can still walk/jump/crouch) **→ RECOVERY ~4 s** (refills 50/s, energy actions
+  locked until full, fire/reload return). HUD: energy line + STUN/RECOVER/SHIELD tags. Shield extends the
+  M9 damage seam via `take_damage(amount, team, shot_dir, hit_point)`; stranded/debug damage is
+  unblockable (`shot_dir=0`).
 
 ---
 
@@ -261,17 +296,24 @@ calls `take_damage`.
   per-weapon numbers in `weapon_defs.gd`, SMG full-auto test weapon (key 3), `$Muzzle` marker, crouch
   camera-drop. Signed off.
 
+- **M9** Health / death / respawn + kills→score. Pure `sim/health.gd` (HP/invuln/respawn, integer-tick)
+  applied through `player.gd`; combat applies damage to victim HP; a lethal hit emits `died(killer_team)`
+  → `MatchDirector` → `MatchState.add_point` (replacing the F4/F5 debug points, now debug-damage). Base
+  HP 100, respawn 3 s, spawn invuln 5 s broken by firing; stranded DoT (`100/180` HP/tick) credits the
+  enemy. Signed off.
+
 **Feature layers (each opens with its own tuning questions):**
-- **M9 (BUILT — awaiting playtest sign-off)** Health / death / respawn + kills→score. Pure
-  `sim/health.gd` (HP/invuln/respawn, integer-tick) applied through `player.gd`; combat applies damage
-  to victim HP; a lethal hit emits `died(killer_team)` → `MatchDirector` → `MatchState.add_point`
-  (replacing the F4/F5 debug points, now debug-damage). Base HP 100, respawn 3 s, spawn invuln 5 s
-  broken by firing; stranded DoT (`100/180` HP/tick) wired into the `_apply_tile_restriction` stranded
-  branch with the death credited to the enemy. *Verified: test_m9 13/13 + test_m8_integration 10/10
-  twice byte-identical; m8_combat boots clean and applies damage live (HP → 0 → kill). Manual playtest
-  pending.*
-- **M10** Energy (200; sprint/dodge/shield/build; 0→2 s stun) + dodge roll + directional shield.
-- **M11** Detection (20 m, 50 m/1 s on fire, team-shared, 3 s linger, outlines + HP bars, indicator).
+- **M10 + M10.1 (signed off)** Energy + dodge roll + directional shield. Pure
+  `sim/energy.gd` (200 pool, regen 40/s w/ per-action delay, 2-phase stun→recovery), `sim/dodge.gd`
+  (uncancellable burst, no i-frames, 17.5 m/s), `sim/shield.gd` (ray-vs-quad block) applied through
+  `player.gd`; the shield extends the M9 damage seam (`take_damage(amount, team, shot_dir, hit_point)`),
+  absorbing into energy (2× the damage). Toggle-F shield (not planted, tracks full aim yaw+pitch via a
+  `top_level` quad pushed out, blocks only what crosses the visible plane), X dodge, energy-gated sprint,
+  stun visual + opponent-visible shield plane, energy HUD line. **M10.1:** per-action regen delays (sprint
+  0, dodge/shield 1 s) composed as a single-int `max` (parallel, scales to e.g. a 5 s build delay).
+  *Verified: test_m10 24/24 + test_m8_integration 12/12 twice byte-identical; m8_combat boots clean;
+  M7 regression 11/11. Playtest signed off.*
+- **M11 (NEXT)** Detection (20 m, 50 m/1 s on fire, team-shared, 3 s linger, outlines + HP bars, indicator).
 - **M12** Structures (build radial menu; wall/turret/lookout; owned-tiles-only; persist; SpringArm
   camera collision lands here).
 - **M13** Cards & decks (deckbuild in menu, seeded draws, 5-card hand visible to both, swap/use).

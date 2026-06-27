@@ -102,11 +102,11 @@ func _unhandled_input(event: InputEvent) -> void:
 func _update_hud() -> void:
 	if _hud == null:
 		return
-	_hud.text = "%s   round %d\nrounds  T1 %d : %d T2\npoints  T1 %d : %d T2%s%s%s\n[F4] dmg bot  [F5] dmg self  [F6] restart" % [
+	_hud.text = "%s   round %d\nrounds  T1 %d : %d T2\npoints  T1 %d : %d T2%s%s%s%s\n[F4] dmg bot  [F5] dmg self  [F6] restart" % [
 		_phase_label(), _state.round_index,
 		_state.round_wins[MatchState.TEAM1], _state.round_wins[MatchState.TEAM2],
 		_state.points[MatchState.TEAM1], _state.points[MatchState.TEAM2],
-		_winner_suffix(), _hp_line(), _weapon_line(),
+		_winner_suffix(), _hp_line(), _energy_line(), _weapon_line(),
 	]
 
 ## M9 HUD line: both actors' HP + a state tag (DEAD countdown / INVULN). Empty in scenes without HP.
@@ -126,6 +126,27 @@ func _hp_tag(h) -> String:
 		return " DEAD %.1fs" % (h.respawn_ticks() / 60.0)
 	if h.is_invulnerable():
 		return " INVULN"
+	return ""
+
+## M10 HUD line: both actors' energy + a state tag (STUN / RECOVER / SHIELD). Empty in scenes without it.
+func _energy_line() -> String:
+	if _player == null or not _player.has_method("energy"):
+		return ""
+	var p = _player.energy()
+	var t1 := "%d%s" % [p.energy_int(), _energy_tag(p, _player)]
+	var t2 := "--"
+	if _bot != null and _bot.has_method("energy"):
+		var b = _bot.energy()
+		t2 = "%d%s" % [b.energy_int(), _energy_tag(b, _bot)]
+	return "\nenergy  T1 %s : %s T2" % [t1, t2]
+
+func _energy_tag(e, actor) -> String:
+	if e.is_stunned():
+		return " STUN %.1fs" % (e.stun_ticks_left() / 60.0)
+	if e.is_recovering():
+		return " RECOVER"
+	if actor.has_method("shield_up") and actor.shield_up():
+		return " SHIELD"
 	return ""
 
 ## M8 HUD line: local player's selected weapon / ammo / reload + the latest hit. Empty

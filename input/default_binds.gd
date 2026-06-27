@@ -27,6 +27,9 @@ static func ensure_default_actions() -> void:
 	_bind("weapon_1", [_key(KEY_1)], [])
 	_bind("weapon_2", [_key(KEY_2)], [])
 	_bind("weapon_3", [_key(KEY_3)], [])   # M8.5 SMG (full-auto test weapon)
+	# M10 energy actions: Dodge = X (GDD §17); Shield = F toggle (GDD §17 omits it — code default).
+	_bind("dodge",  [_key(KEY_X)], [_btn(JOY_BUTTON_RIGHT_SHOULDER)])
+	_bind("shield", [_key(KEY_F)], [_btn(JOY_BUTTON_Y)])
 	# Debug: toggle tile coordinate labels (M3).
 	_bind("debug_toggle_labels", [_key(KEY_F1)], [])
 	# Debug: collapse Team 1 territory to spawn to test stranded free-roam (M5).
