@@ -73,6 +73,14 @@ func _run_suite() -> void:
 	var c := _simulate(_hold(60, Vector2(0, 1), InputCommand.BTN_CROUCH))
 	_check("crouch_speed", abs(c["speed"] - 2.5) < 0.05, "(speed=%.3f)" % c["speed"])
 
+	# M11.5: ADS slows the walk to 0.75x (~3.75).
+	var aw := _simulate(_hold(60, Vector2(0, 1), InputCommand.BTN_ADS))
+	_check("ads_walk_speed", abs(aw["speed"] - 3.75) < 0.05, "(speed=%.3f)" % aw["speed"])
+
+	# M11.5: crouch + ADS stack -> 0.5 * 0.75 = 0.375x (~1.875).
+	var ca := _simulate(_hold(60, Vector2(0, 1), InputCommand.BTN_CROUCH | InputCommand.BTN_ADS))
+	_check("crouch_ads_speed", abs(ca["speed"] - 1.875) < 0.05, "(speed=%.3f)" % ca["speed"])
+
 	# Jump apex ~1.2 m, then lands back on the floor.
 	var jc: Array = [InputCommand.new(0, Vector2.ZERO, Vector2.ZERO, InputCommand.BTN_JUMP)]
 	for i in range(1, 160):

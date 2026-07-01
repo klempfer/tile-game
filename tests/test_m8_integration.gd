@@ -73,12 +73,12 @@ func _run() -> void:
 	var hitscan_shot := {
 		"weapon": WeaponDefs.REVOLVER, "muzzle": Vector3(0, 1.6, -5),
 		"cam_origin": Vector3(0, 1.6, -5), "cam_dir": Vector3(0, 0, 1),
-		"ads": true, "team": 1, "tick": 0,
+		"ads": true, "spread_state": WeaponDefs.SPREAD_STAND, "team": 1, "tick": 0,
 	}
 	var proj_shot := {
 		"weapon": WeaponDefs.BOLT, "muzzle": Vector3(0, 0.9, -5),
 		"cam_origin": Vector3(0, 0.9, -5), "cam_dir": Vector3(0, 0, 1),
-		"ads": true, "team": 1, "tick": 0,
+		"ads": true, "spread_state": WeaponDefs.SPREAD_STAND, "team": 1, "tick": 0,
 	}
 	var shooter := StubActor.new(1, Vector3(0, 0, -5), [hitscan_shot, proj_shot])
 	combat._actors = [shooter, target]
@@ -105,7 +105,7 @@ func _run() -> void:
 	var converge_shot := {
 		"weapon": WeaponDefs.REVOLVER, "muzzle": Vector3(-0.5, 1.0, -5),
 		"cam_origin": Vector3(0, 1.0, -5), "cam_dir": Vector3(0, 0, 1),
-		"ads": true, "team": 1, "tick": 0,
+		"ads": true, "spread_state": WeaponDefs.SPREAD_STAND, "team": 1, "tick": 0,
 	}
 	var s3 := StubActor.new(1, Vector3(0, 0, -5), [converge_shot])
 	combat._actors = [s3, target]
@@ -119,7 +119,7 @@ func _run() -> void:
 	var miss_shot := {
 		"weapon": WeaponDefs.BOLT, "muzzle": Vector3(0, 1.0, -5),
 		"cam_origin": Vector3(0, 1.0, -5), "cam_dir": Vector3(0, 0, 1),
-		"ads": true, "team": 1, "tick": 0,
+		"ads": true, "spread_state": WeaponDefs.SPREAD_STAND, "team": 1, "tick": 0,
 	}
 	var lone := StubActor.new(1, Vector3(0, 0, -5), [miss_shot])   # no enemy: nothing to hit
 	combat._actors = [lone]
@@ -146,9 +146,11 @@ func _run() -> void:
 	p.is_local = false   # bot: no mouse capture / camera grab in a headless test
 	add_child(p)
 	var stand_muzzle: float = p._muzzle_origin().y - p.global_position.y
-	p._apply_crouch(true)
+	for i in 20:                 # M11.5: drive the gradual crouch fully (counter clamps at CROUCH_T_TICKS)
+		p._advance_crouch(true)
 	var crouch_muzzle: float = p._muzzle_origin().y - p.global_position.y
-	p._apply_crouch(false)
+	for i in 20:                 # ...and back to standing
+		p._advance_crouch(false)
 	var restand_muzzle: float = p._muzzle_origin().y - p.global_position.y
 	p.queue_free()
 	# Standing eye = 1.6; crouched drops by (STAND-CROUCH) = 0.6 -> 1.0; uncrouch restores 1.6.
@@ -163,16 +165,26 @@ func _run() -> void:
 	var pc = PlayerScene.instantiate()
 	pc.is_local = false
 	add_child(pc)
-	pc._queue_shot(WeaponDefs.REVOLVER, false)
+	pc._queue_shot(WeaponDefs.REVOLVER, false, WeaponDefs.SPREAD_STAND)
 	var stand_cam: float = pc.consume_shots()[0]["cam_origin"].y - pc.global_position.y
-	pc._crouch_blend = 1.0   # fully crouched
-	pc._queue_shot(WeaponDefs.REVOLVER, false)
+	for i in 20:             # M11.5: fully crouched via the integer crouch counter
+		pc._advance_crouch(true)
+	pc._queue_shot(WeaponDefs.REVOLVER, false, WeaponDefs.SPREAD_STAND)
 	var crouch_cam: float = pc.consume_shots()[0]["cam_origin"].y - pc.global_position.y
 	pc.queue_free()
 	# Standing cam pivot = HIP_HEIGHT (1.6); crouched drops by CROUCH_CAM_DROP (0.6) -> 1.0.
 	_check("crouch_lowers_cam_origin",
 		is_equal_approx(stand_cam, 1.6) and is_equal_approx(crouch_cam, 1.0) and crouch_cam < stand_cam,
 		"stand=%.2f crouch=%.2f" % [stand_cam, crouch_cam])
+
+	# M11.5 (Fix 8): a dodge with no directional input defaults FORWARD (local -Z rotated by yaw).
+	var dpf = PlayerScene.instantiate()
+	dpf.is_local = false
+	add_child(dpf)
+	dpf._yaw = 0.0
+	var fdir: Vector3 = dpf._dodge_direction(Vector2.ZERO)
+	dpf.queue_free()
+	_check("dodge_defaults_forward", fdir.z < -0.99 and absf(fdir.x) < 0.001, "%v" % fdir)
 
 	# M9: a hit now SUBTRACTS HP from the victim (log-only in M8). One revolver body shot = 26 dmg.
 	combat.reset()
@@ -181,7 +193,7 @@ func _run() -> void:
 	var body_shot := {
 		"weapon": WeaponDefs.REVOLVER, "muzzle": Vector3(0, 0.9, -5),
 		"cam_origin": Vector3(0, 0.9, -5), "cam_dir": Vector3(0, 0, 1),
-		"ads": true, "team": 1, "tick": 0,
+		"ads": true, "spread_state": WeaponDefs.SPREAD_STAND, "team": 1, "tick": 0,
 	}
 	var dmg_shooter := StubActor.new(1, Vector3(0, 0, -5), [body_shot])
 	combat._actors = [dmg_shooter, dmg_target]

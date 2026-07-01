@@ -313,8 +313,24 @@ no dodge/shield buttons yet (its pool stays full) — the seam stays clean.
   0, dodge/shield 1 s) composed as a single-int `max` (parallel, scales to e.g. a 5 s build delay).
   *Verified: test_m10 24/24 + test_m8_integration 12/12 twice byte-identical; m8_combat boots clean;
   M7 regression 11/11. Playtest signed off.*
-- **M11 (NEXT)** Detection (20 m, 50 m/1 s on fire, team-shared, 3 s linger, outlines + HP bars, indicator).
-- **M12** Structures (build radial menu; wall/turret/lookout; owned-tiles-only; persist; SpringArm
+- **M11 (signed off)** Detection (info mechanic). Pure `sim/detection.gd` (per-actor detectability,
+  integer-tick bloom + linger) driven by `scripts/detection_director.gd` (phase-gated like combat).
+  WoWS model: firing blooms YOUR own detectability (`on_fire` in `_fire`). Base **17.5 m** (user override
+  of §11's 20 m), fire-bloom **50 m / 1 s**, linger **2 s** (user override of 3 s), center-to-center,
+  team-shared. Enemies hidden until detected — a single `$Model` node wraps the body (capsule + nose +
+  future assets) so ONE `visible` toggle hides everything (asset-swap seam); code-built red inverted-hull
+  silhouette + billboarded HP bar (render_priority-ordered, depth-tested); `detect YOU/bot` HUD line.
+  *Verified: test_m11 10/10 + test_m8_integration twice byte-identical; playtest signed off.*
+- **M11.5 (BUILT — awaiting playtest sign-off)** Cleanup pass (9 fixes): dead actors stop capturing (`player.alive()` gates
+  presence in `tile_grid_view`); ADS walk ×0.75 stacking with crouch (`player_motion`); firing interrupts
+  sprint + can't fire mid-sprint (per-weapon `fire_while_sprint` exception hook); **state-dependent spread**
+  (per-weapon `spread_hip`/`spread_ads` tables × stand/walk/air/crouch/crouch-walk/sprint, resolved from a
+  shot's `spread_state`); **semi-auto** revolver/bolt (per-click + 0.2 s input queue, swap resets queue;
+  `auto` flag) vs full-auto SMG; **post-dodge 0.2 s action lock** (single `_ticks_left = DODGE_TICKS +
+  LOCK_TICKS`, velocity zero during lock); dodge defaults **forward**; **gradual integer-tick crouch**
+  (`_crouch_t`/`CROUCH_T_TICKS`, drives hitbox + camera, smooth under spam). *Verified: m8 24/24, m1 12/12,
+  m10 25/25, m8_integration 17/17 (twice byte-identical), m8_5 18/18, m4 13/13; m8_combat boots clean.*
+- **M12 (NEXT)** Structures (build radial menu; wall/turret/lookout; owned-tiles-only; persist; SpringArm
   camera collision lands here).
 - **M13** Cards & decks (deckbuild in menu, seeded draws, 5-card hand visible to both, swap/use).
 - **M14** Bot AI (difficulty levels; capture/fight/build/card behavior).

@@ -41,7 +41,9 @@ const CAM_MIN_Y := 0.4          # camera never dips below this height (flat grou
 # points lower in the world via parallax and recoil/AOP stay untouched (crouch = translation, AOP =
 # angle; orthogonal). Both knobs are independently tunable.
 const CROUCH_CAM_DROP := 0.6    # how far the camera lowers when fully crouched (= STAND-CROUCH height)
-const CROUCH_BLEND_SPEED := 8.0 # 1/sec; ~0.125s stand <-> crouch camera ease (matches ADS)
+const CROUCH_T_TICKS := 9       # M11.5: integer-tick crouch transition (~0.15 s); drives BOTH the hitbox
+                                # height and the camera drop, so the head lowers gradually (no instant snap
+                                # that lets crouch-spam juke headshots). Smooth even when spamming crouch.
 
 # M5 movement restriction: inset the body from disallowed tile edges. = capsule
 # radius so the whole capsule stays on legal tiles. Single knob for footprint feel —
@@ -60,7 +62,7 @@ var _tick := 0
 var _yaw := 0.0
 var _pitch := 0.0
 var _ads_blend := 0.0
-var _crouch_blend := 0.0        # 0 = standing, 1 = crouched; eases the camera down (visual, like ADS)
+var _crouch_t := 0              # M11.5: integer crouch transition (0 = standing .. CROUCH_T_TICKS = crouched)
 var _base_fov := 75.0           # hip FOV; later driven by the Config FOV slider
 var _grid = null                # bound TileGrid sim (M5); null in scenes without a grid
 var _team := 0                  # which team's walkable region restricts this player
@@ -92,7 +94,7 @@ var _hpbar_fg: MeshInstance3D = null # M11: the HP bar's foreground quad (scaled
 # M8.5: bullet-origin marker. A real node (not a computed point) so that once character + weapon
 # models exist it can be parented under the weapon — its global_position then tracks the actual muzzle
 # through any animation for free. For the placeholder capsule its height follows the crouch (see
-# _apply_crouch). get_node_or_null keeps older scenes safe; _muzzle_origin() falls back to a computed
+# _apply_crouch_height). get_node_or_null keeps older scenes safe; _muzzle_origin() falls back to a computed
 # eye point if absent.
 @onready var _muzzle: Marker3D = get_node_or_null("Muzzle")
 # M10: translucent flat barrier shown in front of the actor while the shield is up. A world mesh (not
@@ -209,10 +211,14 @@ func _physics_process(_delta: float) -> void:
 	# M10 shield (toggle): raise/lower on the press edge; passive drain; drop if it bottoms out.
 	_update_shield(cmd, can_act)
 
-	# M10: feed motion/fire a gated command — strip sprint when unpayable / shielding, and strip
-	# fire+reload while shielding or stunned. (Walk/jump/crouch always pass; weapon-switch too.)
+	# M10/M11.5: feed motion/fire a gated command — strip sprint when unpayable / shielding / firing, and
+	# strip fire+reload while shielding or stunned. (Walk/jump/crouch always pass; weapon-switch too.)
+	# M11.5 Fix 3: holding fire drops you out of sprint (so you can't fire mid-sprint) unless the current
+	# weapon opts into fire_while_sprint — the easy per-weapon exception. Sprint is stripped here BEFORE the
+	# energy drain, so a fire-interrupted sprint also stops draining energy that tick.
 	var stripped: int = cmd.buttons
-	var sprint_ok: bool = (cmd.buttons & InputCommand.BTN_SPRINT) != 0 and can_act and not _shield_up
+	var sprint_ok: bool = (cmd.buttons & InputCommand.BTN_SPRINT) != 0 and can_act and not _shield_up \
+		and not _fire_suppresses_sprint(cmd)
 	if sprint_ok and not _energy.drain(Energy.SPRINT_DRAIN_PER_TICK, Energy.SPRINT_REGEN_DELAY):
 		sprint_ok = false  # bottomed out this tick -> stun; sprint ends
 	if not sprint_ok:
@@ -233,7 +239,7 @@ func _physics_process(_delta: float) -> void:
 		# takes over next tick. The death signal was already emitted in _apply_tile_restriction.
 		_tick += 1
 		return
-	_apply_crouch(_motion.crouching)
+	_advance_crouch(_motion.crouching)  # M11.5: gradual integer-tick crouch (hitbox + camera)
 	_fire(mcmd, look_res["delta"])  # M8/M8.5: fire decision -> shot (pre-impulse) -> recoil via look channel
 	_health.tick()                  # M9: count down spawn invulnerability (alive path)
 	_energy.tick()                  # M10: regen / stun / recovery countdown
@@ -245,12 +251,12 @@ func _physics_process(_delta: float) -> void:
 		_update_camera(ads, FIXED_DT)
 	_tick += 1
 
-## M10: world-space dodge direction from camera-relative move input; straight backward (toward the
-## camera) when there is no directional input, so a no-input dodge is a back-hop.
+## M10: world-space dodge direction from camera-relative move input. M11.5 (Fix 8): a no-input dodge
+## defaults FORWARD (away from the camera) instead of backward.
 func _dodge_direction(move_dir: Vector2) -> Vector3:
 	var dir := Vector3(move_dir.x, 0.0, -move_dir.y)
 	if dir.length() < 0.01:
-		dir = Vector3(0.0, 0.0, 1.0)  # local backward
+		dir = Vector3(0.0, 0.0, -1.0)  # local forward
 	return dir.rotated(Vector3.UP, _yaw)
 
 ## M10: set the shield raised/lowered and keep the placeholder barrier mesh in sync.
@@ -286,7 +292,7 @@ func _tick_dodge(cmd, look_delta: Vector2) -> void:
 	if _health.is_dead():
 		_tick += 1
 		return
-	_apply_crouch(false)
+	_advance_crouch(false)  # M11.5: ease toward standing during a roll / the post-roll lock
 	_fire(ncmd, look_delta)
 	_dodge.tick()
 	_health.tick()
@@ -317,7 +323,7 @@ func reset_to_spawn(pos: Vector3, yaw: float) -> void:
 	velocity = Vector3.ZERO
 	_motion.reset()
 	_ads_blend = 0.0
-	_crouch_blend = 0.0
+	_crouch_t = 0          # M11.5: snap to standing on a round reset (no leftover crouch transition)
 	_tick = 0
 	_loadout.reset()       # M8: fresh weapon / full mags each round
 	_pending_shots.clear()
@@ -328,7 +334,7 @@ func reset_to_spawn(pos: Vector3, yaw: float) -> void:
 	_set_shield(false)     # M10: shield down
 	_detection.reset()     # M11: go dark; the director re-reveals the enemy when detected
 	_rendered = is_local   # M11: enemies start hidden until detected; the local player always renders
-	_apply_crouch(false)
+	_apply_crouch_height(0.0)  # M11.5: standing hitbox/height
 	_refresh_combat_visual()
 	if is_local:
 		_update_camera(false, 0.0)
@@ -461,6 +467,11 @@ func _update_hpbar() -> void:
 func health():
 	return _health
 
+## M11.5: whether this actor is alive (drives tile influence — a dead actor stops capturing/contesting
+## the instant it dies, before respawn).
+func alive() -> bool:
+	return not _health.is_dead()
+
 ## M10: the live energy state (for the HUD readout: energy / stun / recover / shield).
 func energy():
 	return _energy
@@ -489,6 +500,26 @@ func body_center() -> Vector3:
 	var h: float = shape.height if shape else STAND_HEIGHT
 	return global_position + Vector3(0.0, h * 0.5, 0.0)
 
+## M11.5 (Fix 3): holding fire drops you out of sprint unless the current weapon allows fire-while-sprint
+## (the easy per-weapon exception). Pure read of the command + the selected weapon.
+func _fire_suppresses_sprint(cmd) -> bool:
+	if (cmd.buttons & InputCommand.BTN_FIRE) == 0:
+		return false
+	return not bool(WeaponDefs.get_def(_loadout.current).get("fire_while_sprint", false))
+
+## M11.5 (Fix 4/5): the movement-state spread tier at fire time, from the ALREADY-gated command (so a
+## fire-interrupted sprint reads as walk/stand, and SPRINT is only reachable by fire_while_sprint weapons).
+## Crouch outranks sprint to match the speed model (_target_speed). Stamped into the shot for the resolver.
+func _spread_state(cmd) -> int:
+	if not is_on_floor():
+		return WeaponDefs.SPREAD_AIR
+	var moving: bool = cmd.move_dir.length() > 0.1
+	if _motion.crouching:
+		return WeaponDefs.SPREAD_CROUCH_WALK if moving else WeaponDefs.SPREAD_CROUCH
+	if (cmd.buttons & InputCommand.BTN_SPRINT) != 0:
+		return WeaponDefs.SPREAD_SPRINT
+	return WeaponDefs.SPREAD_WALK if moving else WeaponDefs.SPREAD_STAND
+
 ## M8: advance the weapon state machine from this tick's command and, if it fired,
 ## queue a Shot for the combat director to resolve. The muzzle/aim origin is the eye
 ## (no shoulder parallax — bullets follow the crosshair); spread/ADS resolve centrally.
@@ -507,7 +538,7 @@ func _fire(cmd, player_delta: Vector2) -> void:
 	var r: Dictionary = _loadout.step(fire_held, reload_pressed, switch_to)
 	# M8.5 first-shot-true: build the shot from the CURRENT (pre-impulse) aim, then apply recoil.
 	if r["fired"]:
-		_queue_shot(int(r["weapon"]), (cmd.buttons & InputCommand.BTN_ADS) != 0)
+		_queue_shot(int(r["weapon"]), (cmd.buttons & InputCommand.BTN_ADS) != 0, _spread_state(cmd))
 		_health.on_fire()  # M9: firing breaks spawn invulnerability
 		_detection.on_fire()  # M11: firing blooms your detectability (WoWS — firing reveals you)
 	# M8.5 recoil through the look channel: an impulse on a firing tick, AOP tracking + recovery
@@ -524,17 +555,18 @@ func _fire(cmd, player_delta: Vector2) -> void:
 ## the rig pivot, along look_forward), and ADS; the combat director converges the muzzle shot onto
 ## whatever the crosshair covers, killing the third-person muzzle-vs-camera parallax. The pivot uses
 ## the live ADS-blended rig so it matches what the player sees.
-func _queue_shot(weapon: int, ads: bool) -> void:
+func _queue_shot(weapon: int, ads: bool, state: int) -> void:
 	var rig := rig_params(_ads_blend)
 	# Crouch-lowered pivot height, identical to the rendered camera (see _update_camera) so the
 	# crosshair ray (trace #1) starts at the real camera pivot and convergence stays correct.
-	var cam_height: float = rig["height"] - _crouch_blend * CROUCH_CAM_DROP
+	var cam_height: float = rig["height"] - _crouch_frac() * CROUCH_CAM_DROP
 	_pending_shots.append({
 		"weapon": weapon,
 		"muzzle": _muzzle_origin(),
 		"cam_origin": global_position + Vector3(0.0, cam_height, 0.0) + look_right(_yaw) * rig["shoulder"],
 		"cam_dir": look_forward(_yaw, _pitch),
 		"ads": ads,
+		"spread_state": state,  # M11.5: movement-state spread tier, resolved by the combat director
 		"team": _team,
 		"tick": _tick,
 	})
@@ -584,8 +616,25 @@ func _apply_tile_restriction(from_pos: Vector3) -> void:
 		if _health.take_damage(Health.STRANDED_DOT_PER_TICK):
 			_die(_enemy_team())
 
-func _apply_crouch(crouched: bool) -> void:
-	var h := CROUCH_HEIGHT if crouched else STAND_HEIGHT
+## M11.5: the crouch transition as a 0..1 fraction from the integer counter (deterministic; no float dt
+## accumulation). Drives both the hitbox height and the camera/aim drop.
+func _crouch_frac() -> float:
+	return float(_crouch_t) / float(CROUCH_T_TICKS)
+
+## M11.5: advance the integer crouch counter one tick toward the target stance, then apply the height.
+## Gradual (not instant) so the head lowers smoothly — even when spamming crouch the counter just reverses.
+func _advance_crouch(target_crouching: bool) -> void:
+	if target_crouching:
+		_crouch_t = mini(_crouch_t + 1, CROUCH_T_TICKS)
+	else:
+		_crouch_t = maxi(_crouch_t - 1, 0)
+	_apply_crouch_height(_crouch_frac())
+
+## M11.5: set the capsule (collision + mesh) and muzzle to the height for crouch fraction `frac`
+## (0 = standing, 1 = fully crouched). Feet stay at y=0 (offset = height/2), so the head lowers with no
+## vertical pop; the hitbox height tracks gradually so headshots follow the head smoothly.
+func _apply_crouch_height(frac: float) -> void:
+	var h := lerpf(STAND_HEIGHT, CROUCH_HEIGHT, frac)
 	var shape := _col.shape as CapsuleShape3D
 	if shape and not is_equal_approx(shape.height, h):
 		shape.height = h
@@ -608,7 +657,7 @@ func _eye_height() -> float:
 
 ## Bullet origin = the weapon muzzle, read from the $Muzzle marker so it tracks the real muzzle once
 ## models/animation exist (parent the marker under the weapon then; this script needs no change). The
-## placeholder marker's height is kept in sync with the crouch by _apply_crouch. Combat keeps a small
+## placeholder marker's height is kept in sync with the crouch by _apply_crouch_height. Combat keeps a small
 ## TRACE_BACK behind this point so a target right up against the muzzle still registers. Falls back to a
 ## computed eye point if a scene lacks the marker.
 func _muzzle_origin() -> Vector3:
@@ -618,15 +667,16 @@ func _muzzle_origin() -> Vector3:
 
 func _update_camera(ads: bool, dt: float) -> void:
 	_ads_blend = move_toward(_ads_blend, 1.0 if ads else 0.0, ADS_BLEND_SPEED * dt)
-	_crouch_blend = move_toward(_crouch_blend, 1.0 if _motion.crouching else 0.0, CROUCH_BLEND_SPEED * dt)
 	var p := rig_params(_ads_blend)
 	# Zoom from FOV only (magnification relative to base FOV); aim direction is
 	# unchanged, so the crosshair (screen center) stays centered while ADS shifts
 	# the camera laterally right via the larger shoulder offset.
 	_camera.fov = lerpf(_base_fov, ads_fov_for(_base_fov, ADS_ZOOM), _ads_blend)
-	# Crouch lowers the pivot height (camera-drop only — reticle points lower via parallax; aim angle
-	# and recoil AOP are untouched). The shot's cam_origin uses the SAME drop so convergence holds.
-	var cam_height: float = p["height"] - _crouch_blend * CROUCH_CAM_DROP
+	# Crouch lowers the pivot height (camera-drop only — reticle points lower via parallax; aim angle and
+	# recoil AOP untouched). M11.5: the same integer-tick crouch fraction drives the hitbox AND this drop
+	# (advanced in _advance_crouch each tick), so the shot's cam_origin uses the SAME drop and convergence
+	# holds. No separate float ease here anymore.
+	var cam_height: float = p["height"] - _crouch_frac() * CROUCH_CAM_DROP
 	var cam_pos := camera_position_grounded(global_position, _yaw, _pitch, p["dist"], cam_height, p["shoulder"], CAM_MIN_Y)
 	_camera.global_position = cam_pos
 	_camera.look_at(cam_pos + look_forward(_yaw, _pitch), Vector3.UP)

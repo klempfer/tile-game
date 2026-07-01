@@ -72,11 +72,12 @@ func _spawn_shot(shot: Dictionary) -> void:
 	var target: Dictionary = {}
 	if enemy != null:
 		target = enemy.hitbox()
-	# Two-trace convergence: aim from the muzzle at whatever the crosshair (camera ray)
-	# covers, then apply hip-fire spread to that converged direction (ADS = none).
+	# Two-trace convergence: aim from the muzzle at whatever the crosshair (camera ray) covers, then apply
+	# spread to that converged direction. M11.5: the cone depends on ADS + the firer's movement state
+	# (spread_state, stamped into the shot); ADS uses a smaller table. A 0° cone returns forward unchanged.
 	var dir := Ballistics.aim_direction(shot["muzzle"], shot["cam_origin"], shot["cam_dir"], target, AIM_FAR)
-	if not bool(shot["ads"]):
-		dir = Ballistics.sample_spread(dir, deg_to_rad(w["cone_deg"]), Rng.stream("weapon_spread"))
+	var cone: float = WeaponDefs.spread_cone(w, bool(shot["ads"]), int(shot["spread_state"]))
+	dir = Ballistics.sample_spread(dir, deg_to_rad(cone), Rng.stream("weapon_spread"))
 	if int(w["kind"]) == WeaponDefs.HITSCAN:
 		_resolve_hitscan(shot, w, dir, enemy)
 	else:

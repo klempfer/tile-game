@@ -34,6 +34,7 @@ func _run_suite() -> void:
 	_test_loadout()
 	_test_smg()
 	_test_ballistics()
+	_test_spread_states()
 	_test_aim_convergence()
 
 # --- SMG (M8.5 full-auto test weapon): 900 rpm = every 4 ticks, 30-round mag ---
@@ -70,45 +71,105 @@ func _test_loadout() -> void:
 	var fire_ticks: int = rev["fire_ticks"]   # 30
 	var mag: int = rev["mag"]                  # 6
 
-	# Fire-rate gating: holding fire fires on tick 0 then every fire_ticks.
+	# M11.5 semi-auto: HOLDING fire fires exactly once (tick 0) — no auto-repeat.
 	var lo := WeaponLoadout.new()
-	var fire_ticks_hit: Array = []
-	for t in 3 * fire_ticks + 1:               # 91 ticks
+	var held_fires: Array = []
+	for t in 3 * fire_ticks + 1:
 		var r: Dictionary = lo.step(true, false, -1)
 		if r["fired"]:
-			fire_ticks_hit.append(t)
-	_check("fire_rate_gating", fire_ticks_hit == [0, fire_ticks, 2 * fire_ticks, 3 * fire_ticks],
-		str(fire_ticks_hit))
+			held_fires.append(t)
+	_check("semi_one_shot_per_hold", held_fires == [0], str(held_fires))
 
-	# Magazine empties after `mag` shots; ammo hits 0 and no further fire until reload.
+	# M11.5 semi-auto: a fresh click (release between) fires each shot once off cooldown.
+	var lo_c := WeaponLoadout.new()
+	var click_fires: Array = []
+	for t in 2 * fire_ticks + 1:
+		var held := (t % fire_ticks) == 0      # click on 0, fire_ticks, 2*fire_ticks
+		var r: Dictionary = lo_c.step(held, false, -1)
+		if r["fired"]:
+			click_fires.append(t)
+	_check("semi_click_each_shot", click_fires == [0, fire_ticks, 2 * fire_ticks], str(click_fires))
+
+	# M11.5 input queue: a click a few ticks early still fires the instant the cooldown clears.
+	var lo_q := WeaponLoadout.new()
+	lo_q.step(true, false, -1)                 # shot 0 -> cooldown
+	var early := fire_ticks - 5                 # click 5 ticks before the cooldown ends
+	var queue_fire := -1
+	for i in 2 * fire_ticks:
+		var step := i + 1
+		var r: Dictionary = lo_q.step(step == early, false, -1)
+		if r["fired"]:
+			queue_fire = step
+			break
+	_check("semi_input_queue_fires_early_click", queue_fire == fire_ticks,
+		"fired=%d expected=%d" % [queue_fire, fire_ticks])
+
+	# M11.5 input queue expires: a click MORE than FIRE_QUEUE_TICKS early is dropped (no shot).
+	var lo_x := WeaponLoadout.new()
+	lo_x.step(true, false, -1)                 # shot 0 -> cooldown
+	var too_early := fire_ticks - WeaponLoadout.FIRE_QUEUE_TICKS - 3
+	var extra_fire := false
+	for i in 2 * fire_ticks:
+		var step := i + 1
+		var r: Dictionary = lo_x.step(step == too_early, false, -1)
+		if r["fired"]:
+			extra_fire = true
+	_check("semi_input_queue_expires", not extra_fire, "extra_fire=%s" % extra_fire)
+
+	# M11.5 swap clears the fire queue: a queued early press doesn't carry over to the new weapon.
+	var lo_s := WeaponLoadout.new()
+	lo_s.step(true, false, -1)                 # fire revolver -> cooldown
+	lo_s.step(false, false, -1)                # release
+	lo_s.step(true, false, -1)                 # click during cooldown -> queued
+	lo_s.step(false, false, WeaponDefs.BOLT)   # swap -> queue cleared
+	var fired_after_swap := false
+	for i in 2 * fire_ticks:
+		var r: Dictionary = lo_s.step(false, false, -1)   # released; a surviving queue would fire here
+		if r["fired"]:
+			fired_after_swap = true
+	_check("swap_clears_fire_queue", not fired_after_swap and lo_s.current == WeaponDefs.BOLT,
+		"fired=%s" % fired_after_swap)
+
+	# M11.5 holding fire THROUGH a swap doesn't auto-fire the new (semi) weapon — no rising edge.
+	var lo_h := WeaponLoadout.new()
+	lo_h.step(true, false, -1)                 # fire revolver (held)
+	var bolt_autofired := false
+	for i in WeaponDefs.get_def(WeaponDefs.BOLT)["fire_ticks"] + 5:
+		var sw := WeaponDefs.BOLT if i == 0 else -1
+		var r: Dictionary = lo_h.step(true, false, sw)    # HOLD fire throughout
+		if int(r["weapon"]) == WeaponDefs.BOLT and r["fired"]:
+			bolt_autofired = true
+	_check("held_fire_through_swap_no_autofire", not bolt_autofired, "autofired=%s" % bolt_autofired)
+
+	# Magazine empties after `mag` clicks; ammo hits 0.
 	var lo2 := WeaponLoadout.new()
 	var fired_count := 0
-	for t in (mag - 1) * fire_ticks + 1:       # exactly enough ticks for `mag` shots
-		var r2: Dictionary = lo2.step(true, false, -1)
+	for t in mag * fire_ticks:
+		var held := (t % fire_ticks) == 0      # one click per cooldown
+		var r2: Dictionary = lo2.step(held, false, -1)
 		if r2["fired"]:
 			fired_count += 1
 	_check("magazine_depletes", fired_count == mag and lo2.ammo() == 0,
 		"fired=%d ammo=%d" % [fired_count, lo2.ammo()])
 
-	# Empty trigger auto-starts a reload; releasing it lets the magazine refill cleanly.
+	# Empty-magazine click auto-starts a reload (not a dry fire); releasing lets it refill.
 	var reload_ticks: int = rev["reload_ticks"]
-	var started_reload := false
-	for t in fire_ticks + 1:                    # drain cooldown; empty pull triggers reload
-		var r3: Dictionary = lo2.step(true, false, -1)
-		if r3["reloading"]:
-			started_reload = true
-	for t in reload_ticks:                       # release fire and let the reload complete
+	lo2.step(false, false, -1)                 # release so the next click is a fresh edge
+	var er: Dictionary = lo2.step(true, false, -1)   # click on empty -> auto reload
+	var started_reload: bool = er["reloading"]
+	for t in reload_ticks:
 		lo2.step(false, false, -1)
-	_check("auto_reload_refills", started_reload and lo2.ammo() == mag and not lo2.reloading(),
+	_check("empty_click_auto_reloads", started_reload and lo2.ammo() == mag and not lo2.reloading(),
 		"ammo=%d" % lo2.ammo())
 
-	# Manual reload: can't fire while reloading; magazine full after exactly reload_ticks.
+	# Manual reload: can't fire while reloading (even spamming clicks); full after exactly reload_ticks.
 	var lo3 := WeaponLoadout.new()
 	lo3.step(true, false, -1)                  # fire one (ammo mag-1)
 	lo3.step(false, true, -1)                  # press reload -> reloading
 	var blocked_during_reload := true
-	for t in reload_ticks - 1:                 # still reloading on these ticks
-		var r4: Dictionary = lo3.step(true, false, -1)
+	for t in reload_ticks - 1:
+		var held := (t % 5) == 0               # spam clicks during the reload
+		var r4: Dictionary = lo3.step(held, false, -1)
 		if r4["fired"]:
 			blocked_during_reload = false
 	var was_reloading: bool = lo3.reloading()
@@ -120,7 +181,7 @@ func _test_loadout() -> void:
 	var lo4 := WeaponLoadout.new()
 	lo4.step(false, false, WeaponDefs.BOLT)
 	var on_bolt: bool = lo4.current == WeaponDefs.BOLT
-	lo4.step(true, false, -1)                  # fire a bolt
+	lo4.step(true, false, -1)                  # click -> fire a bolt
 	var bolt_mag: int = WeaponDefs.get_def(WeaponDefs.BOLT)["mag"]
 	var bolt_ammo_dropped: bool = lo4.ammo() == bolt_mag - 1
 	lo4.step(false, false, WeaponDefs.REVOLVER)
@@ -128,12 +189,27 @@ func _test_loadout() -> void:
 	_check("weapon_switch", on_bolt and bolt_ammo_dropped and revolver_full,
 		"bolt_ammo=%d" % (bolt_mag - 1))
 
+# --- M11.5 state-dependent spread (weapon_defs.spread_cone) ---
+
+func _test_spread_states() -> void:
+	var rev := WeaponDefs.get_def(WeaponDefs.REVOLVER)
+	var hip_stand := WeaponDefs.spread_cone(rev, false, WeaponDefs.SPREAD_STAND)
+	var hip_walk := WeaponDefs.spread_cone(rev, false, WeaponDefs.SPREAD_WALK)
+	var hip_air := WeaponDefs.spread_cone(rev, false, WeaponDefs.SPREAD_AIR)
+	var hip_crouch := WeaponDefs.spread_cone(rev, false, WeaponDefs.SPREAD_CROUCH)
+	var ads_stand := WeaponDefs.spread_cone(rev, true, WeaponDefs.SPREAD_STAND)
+	# Ordering: air worst, then walk, then stand, crouch-still tightest; ADS is tighter than hip.
+	var ordering := hip_air > hip_walk and hip_walk > hip_stand and hip_stand > hip_crouch
+	var ads_tighter := ads_stand < hip_stand
+	_check("spread_states_ordering", ordering and ads_tighter,
+		"air=%.2f walk=%.2f stand=%.2f crouch=%.2f ads=%.2f" % [hip_air, hip_walk, hip_stand, hip_crouch, ads_stand])
+
 # --- Ballistics (spread, falloff, headshot, hitscan, projectile) ---
 
 func _test_ballistics() -> void:
 	var fwd := Vector3(0, 0, -1)
 	var rev := WeaponDefs.get_def(WeaponDefs.REVOLVER)
-	var half := deg_to_rad(rev["cone_deg"])    # 3 deg
+	var half := deg_to_rad(WeaponDefs.spread_cone(rev, false, WeaponDefs.SPREAD_STAND))  # hip stand, 2 deg
 
 	# Spread is reproducible: identical seed -> identical sampled direction.
 	var rng_a := RandomNumberGenerator.new(); rng_a.seed = 123

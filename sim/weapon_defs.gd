@@ -13,6 +13,15 @@ const REVOLVER := 0
 const BOLT := 1
 const SMG := 2
 
+# M11.5 spread states — index into a weapon's spread_hip / spread_ads arrays. Derived each shot from
+# the actor's (already-gated) motion; SPRINT only reachable by future fire_while_sprint weapons.
+const SPREAD_STAND := 0
+const SPREAD_WALK := 1
+const SPREAD_AIR := 2
+const SPREAD_CROUCH := 3
+const SPREAD_CROUCH_WALK := 4
+const SPREAD_SPRINT := 5
+
 # Shared geometry. Actor capsule: radius 0.4, height 1.8 standing / 1.2 crouched, origin
 # at the feet (see player.tscn / player.gd).
 const EYE_HEIGHT := 1.6        # muzzle / aim origin height above the actor's feet
@@ -28,7 +37,11 @@ const WEAPONS := [
 		"fire_ticks": 30,          # 0.5 s @ 60 Hz
 		"mag": 6,
 		"reload_ticks": 96,        # 1.6 s
-		"cone_deg": 3.0,           # hip-fire cone half-angle; ADS = 0
+		"auto": false,             # M11.5: semi-auto — one shot per click (+0.2 s input-queue leniency)
+		"fire_while_sprint": false,# M11.5: can't fire mid-sprint (holding fire drops you out of sprint)
+		# M11.5 spread half-angle (deg) by state: [stand, walk, air, crouch-still, crouch-walk, sprint].
+		"spread_hip": [2.0, 4.0, 7.0, 1.0, 2.5, 8.0],
+		"spread_ads": [0.5, 1.5, 3.0, 0.25, 0.5, 0.0],
 		"falloff_full_m": 10.0,
 		"falloff_min_m": 30.0,
 		"falloff_min_factor": 0.40,
@@ -48,7 +61,11 @@ const WEAPONS := [
 		"fire_ticks": 48,          # 0.8 s
 		"mag": 4,
 		"reload_ticks": 132,       # 2.2 s
-		"cone_deg": 2.0,           # spread applied to launch direction
+		"auto": false,             # M11.5: semi-auto — one shot per click (+0.2 s input-queue leniency)
+		"fire_while_sprint": false,
+		# M11.5 spread half-angle (deg) by state: [stand, walk, air, crouch-still, crouch-walk, sprint].
+		"spread_hip": [1.5, 3.5, 6.5, 0.75, 2.0, 7.5],
+		"spread_ads": [0.3, 1.0, 2.5, 0.15, 0.3, 0.0],
 		"falloff_full_m": 15.0,
 		"falloff_min_m": 35.0,
 		"falloff_min_factor": 0.50,
@@ -71,7 +88,11 @@ const WEAPONS := [
 		"fire_ticks": 4,           # 900 rpm
 		"mag": 30,
 		"reload_ticks": 120,       # 2.0 s
-		"cone_deg": 3.5,           # hip-fire cone half-angle; ADS = 0
+		"auto": true,              # M11.5: full-auto test weapon — hold to fire
+		"fire_while_sprint": false,
+		# M11.5 spread half-angle (deg) by state: [stand, walk, air, crouch-still, crouch-walk, sprint].
+		"spread_hip": [3.0, 5.0, 8.0, 2.0, 3.5, 6.0],
+		"spread_ads": [0.75, 2.0, 3.5, 0.5, 0.75, 0.0],
 		"falloff_full_m": 8.0,
 		"falloff_min_m": 25.0,
 		"falloff_min_factor": 0.35,
@@ -88,3 +109,9 @@ const WEAPONS := [
 
 static func get_def(weapon_id: int) -> Dictionary:
 	return WEAPONS[weapon_id]
+
+## M11.5: spread cone half-angle (degrees) for a weapon given ADS + the firer's movement state. ADS uses
+## the smaller spread_ads table. A 0.0 cone yields no spread (Ballistics.sample_spread returns forward).
+static func spread_cone(weapon: Dictionary, ads: bool, state: int) -> float:
+	var arr: Array = weapon["spread_ads"] if ads else weapon["spread_hip"]
+	return arr[state]

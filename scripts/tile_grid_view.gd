@@ -123,6 +123,10 @@ func _build() -> void:
 		marker.material_override = _mat(Color(1, 1, 1, 1))
 		add_child(marker)
 
+## M11.5: an actor influences tiles only while alive. Older scenes whose actors lack health() count as alive.
+func _actor_alive(actor) -> bool:
+	return not actor.has_method("alive") or actor.alive()
+
 ## M7: the MatchDirector pauses capture during countdown / round-over / match-over.
 func set_capture_active(v: bool) -> void:
 	_capture_active = v
@@ -138,11 +142,13 @@ func _physics_process(_dt: float) -> void:
 	if not _capture_active:
 		return
 	var presence := {}
-	if _player != null:
+	# M11.5: a DEAD actor stops influencing tiles immediately (dropping it from presence resets its
+	# in-progress capture and lets a contesting enemy resume). Scenes without health treat actors as alive.
+	if _player != null and _actor_alive(_player):
 		var coord: Vector2i = grid.topology.world_to_tile(_player.global_position)
 		if grid.topology.in_bounds(coord):
 			presence[TileGrid.TEAM1] = coord
-	if _bot != null:
+	if _bot != null and _actor_alive(_bot):
 		var bcoord: Vector2i = grid.topology.world_to_tile(_bot.global_position)
 		if grid.topology.in_bounds(bcoord):
 			presence[TileGrid.TEAM2] = bcoord

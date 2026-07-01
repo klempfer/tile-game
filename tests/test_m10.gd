@@ -48,6 +48,7 @@ func _run_suite() -> void:
 	# --- dodge ---
 	_test_dodge_start_velocity()
 	_test_dodge_auto_stops()
+	_test_dodge_post_roll_lock()
 	_test_dodge_blocked_while_active()
 	_test_dodge_zero_dir_refused()
 	# --- shield: ray-vs-quad geometry (M10.1) ---
@@ -211,12 +212,28 @@ func _test_dodge_start_velocity() -> void:
 		"v=%v active=%s" % [v, d.active()])
 
 func _test_dodge_auto_stops() -> void:
+	# M11.5: the full window is the burst + the post-roll lock; active() clears only after BOTH.
 	var d := Dodge.new()
 	d.try_start(Vector3(1, 0, 0))
-	for i in Dodge.DODGE_TICKS:
+	for i in Dodge.DODGE_TICKS + Dodge.LOCK_TICKS:
 		d.tick()
 	_check("dodge_auto_stops", not d.active() and d.velocity() == Vector3.ZERO,
 		"active=%s ticks_left=%d" % [d.active(), d.ticks_left()])
+
+func _test_dodge_post_roll_lock() -> void:
+	# M11.5: after the moving burst the roll enters a LOCK_TICKS freeze — still active() (input frozen)
+	# but velocity() is zero, and a new dodge is refused. active() clears only after the full window.
+	var d := Dodge.new()
+	d.try_start(Vector3(1, 0, 0))
+	for i in Dodge.DODGE_TICKS:
+		d.tick()                                   # burst done -> now in the lock
+	var locked_frozen := d.active() and d.velocity() == Vector3.ZERO
+	var refused := not d.try_start(Vector3(0, 0, 1))   # can't dodge during the lock
+	for i in Dodge.LOCK_TICKS:
+		d.tick()
+	var freed := not d.active()
+	_check("dodge_post_roll_lock", locked_frozen and refused and freed,
+		"locked=%s refused=%s freed=%s" % [locked_frozen, refused, freed])
 
 func _test_dodge_blocked_while_active() -> void:
 	var d := Dodge.new()

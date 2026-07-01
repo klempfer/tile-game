@@ -12,6 +12,7 @@ const InputCommand = preload("res://input/input_command.gd")
 const WALK_SPEED := 5.0      # m/s
 const SPRINT_MULT := 1.6     # -> ~8 m/s
 const CROUCH_MULT := 0.5     # -> ~2.5 m/s
+const ADS_MULT := 0.75       # M11.5: ADS walk penalty, stacks with crouch (crouch+ADS = 0.5*0.75 = 0.375)
 const GRAVITY := 25.0        # m/s^2
 const JUMP_APEX := 1.2       # m (jump velocity derived from this + gravity)
 const GROUND_ACCEL := 56.25  # m/s^2 ramp toward target (+25% snappier direction changes)
@@ -29,11 +30,16 @@ func reset() -> void:
 	_prev_buttons = 0
 
 func _target_speed(buttons: int) -> float:
+	# M11.5: compose multipliers. Crouch and sprint are mutually exclusive (crouch wins); ADS stacks on
+	# top of either (sprint+ADS can't co-occur — the input layer makes them exclusive).
+	var mult := 1.0
 	if crouching:
-		return WALK_SPEED * CROUCH_MULT
-	if buttons & InputCommand.BTN_SPRINT:
-		return WALK_SPEED * SPRINT_MULT
-	return WALK_SPEED
+		mult *= CROUCH_MULT
+	elif buttons & InputCommand.BTN_SPRINT:
+		mult *= SPRINT_MULT
+	if buttons & InputCommand.BTN_ADS:
+		mult *= ADS_MULT
+	return WALK_SPEED * mult
 
 ## Advance velocity by one fixed tick.
 ##   cmd      : InputCommand (move_dir local: x = strafe, y = forward; buttons bitmask)
