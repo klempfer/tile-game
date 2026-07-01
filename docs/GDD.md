@@ -1,8 +1,9 @@
 # Tile-Capture Shooter — Game Design Document
 
-> Authoritative spec for development. Engine: **Godot 4.7 stable**. Platform: **Windows PC**.
-> Status: pre-implementation. Numbers marked *(TBD)* are intentionally open — see
-> **§19 Open Questions**.
+> Authoritative spec for **design intent**. Engine: **Godot 4.7 stable**. Platform: **Windows PC**.
+> Build status lives in `docs/ROADMAP.md`; code symbol map in `docs/CODEMAP.md`. Numbers marked
+> *(TBD)* are gathered per-milestone — see **§19 Open Questions** (items through M11.5 are resolved;
+> the as-built values live in code, indexed by `docs/CODEMAP.md`).
 
 ## 1. Vision & Pillars
 A 1v1 (later 2v2) third-person shooter where maps are a capturable tile grid. Territory control —
@@ -170,7 +171,9 @@ resets, and comeback mechanics.
 - **Ranked play with ELO** is a later-stage goal.
 
 ## 19. Open Questions (resolve with the user before/while building)
-Numbers and systems the spec leaves unspecified. The first session should ask about these:
+Numbers and systems the spec leaves unspecified. **Combat/weapons/energy/respawn/health/detection
+(M8–M11.5) are resolved** — the as-built values are in code (see `docs/CODEMAP.md`). Still open (ask at
+the milestone): structures, cards, bots, controller/audio below.
 - **Combat tuning:** base HP value; per-weapon damage, fire rate, ammo capacity, reload behavior
   (is there reloading?); falloff curves (start/end distances, min damage); headshot multipliers per
   weapon; exact hip-fire cone angle; recoil pattern specifics.
